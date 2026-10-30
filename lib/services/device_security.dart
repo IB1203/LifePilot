@@ -14,8 +14,8 @@ bool get _isAndroid =>
 
 /// Loads the device key that encrypts LifePilot's private files (Android
 /// Keystore, or DPAPI on Windows). Returns null where there is no platform
-/// key store (tests, other desktops); throws if the key cannot be loaded, so the caller does not mistake that for "no
-/// encryption needed".
+/// key store (tests, other desktops); throws if the key cannot be loaded,
+/// so the caller does not mistake that for "no encryption needed".
 Future<DataCipher?> loadDeviceCipher() async {
   if (!kIsWeb && defaultTargetPlatform == TargetPlatform.windows) {
     return DataCipher(
