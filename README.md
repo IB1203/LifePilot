@@ -63,3 +63,7 @@ Keep `build/symbols` for each release to read crash stack traces. Without `andro
 If a build fails with "Unable to delete directory" under `build\`, OneDrive is locking build outputs. Stop Gradle (`android\gradlew --stop`), delete `build\app`, and build again, or exclude the `build` folder from OneDrive sync.
 
 See [docs/architecture.md](docs/architecture.md) and [docs/implementation-plan.md](docs/implementation-plan.md) for design and remaining work.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
