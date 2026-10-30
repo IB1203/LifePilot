@@ -15,6 +15,7 @@ import '../ui/forms.dart';
 import '../ui/theme.dart';
 import '../ui/widgets.dart';
 import 'sms_settings_page.dart';
+import '../ui/platform.dart';
 
 // ---------------------------------------------------------------------------
 // Accounts
@@ -518,11 +519,12 @@ class RecurringTab extends StatelessWidget {
                   spacing: 8,
                   runSpacing: 8,
                   children: [
-                    FilledButton.tonalIcon(
-                      onPressed: () => importFromSmsInbox(context, store),
-                      icon: const Icon(Icons.sms_outlined),
-                      label: const Text('Scan last 30 days'),
-                    ),
+                    if (!isDesktop)
+                      FilledButton.tonalIcon(
+                        onPressed: () => importFromSmsInbox(context, store),
+                        icon: const Icon(Icons.sms_outlined),
+                        label: const Text('Scan last 30 days'),
+                      ),
                     OutlinedButton.icon(
                       onPressed: () => importPastedSms(context, store),
                       icon: const Icon(Icons.content_paste),

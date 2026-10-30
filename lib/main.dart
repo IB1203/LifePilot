@@ -17,6 +17,7 @@ import 'services/device_security.dart';
 import 'services/notification_service.dart';
 import 'services/reminder_coordinator.dart';
 import 'ui/forms.dart';
+import 'ui/platform.dart';
 import 'ui/theme.dart';
 
 Future<void> main() async {
@@ -93,6 +94,18 @@ class _LifePilotAppState extends State<LifePilotApp> {
         return MaterialApp(
           title: 'LifePilot AI',
           debugShowCheckedModeBanner: false,
+          // On a wide desktop window, keep the phone-sized layout centred.
+          builder: isDesktop
+              ? (context, child) => ColoredBox(
+                    color: Theme.of(context).colorScheme.surfaceContainerLowest,
+                    child: Center(
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 640),
+                        child: child,
+                      ),
+                    ),
+                  )
+              : null,
           theme: buildTheme(Brightness.light, seed: seed),
           darkTheme: buildTheme(Brightness.dark, seed: seed),
           themeMode: switch (settings.themeMode) {

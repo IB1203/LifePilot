@@ -12,6 +12,7 @@ import '../services/upi_launcher.dart';
 import '../ui/forms.dart';
 import '../ui/widgets.dart';
 import 'lock_screen.dart' show confirmIdentity;
+import '../ui/platform.dart';
 
 /// Finance › UPI: scan a UPI QR code or enter a UPI ID, review the payment,
 /// and hand it to a UPI app. LifePilot never sees the UPI PIN and never
@@ -76,6 +77,7 @@ class _UpiTabState extends State<UpiTab> {
 
   @override
   Widget build(BuildContext context) {
+    if (isDesktop) return const _DesktopUpiNote();
     final store = widget.store;
     final scheme = Theme.of(context).colorScheme;
     final payees = [...store.payees]..sort((a, b) {
@@ -815,4 +817,23 @@ class _WarningCard extends StatelessWidget {
       ),
     );
   }
+}
+
+/// UPI payments need a UPI app, which only exists on phones.
+class _DesktopUpiNote extends StatelessWidget {
+  const _DesktopUpiNote();
+
+  @override
+  Widget build(BuildContext context) => ListView(
+        padding: pagePadding,
+        children: const [
+          SizedBox(height: 8),
+          EmptyState(
+            icon: Icons.qr_code_2,
+            title: 'UPI payments are on your phone',
+            message:
+                'Scanning UPI QR codes and paying through GPay, PhonePe or Paytm work in LifePilot on Android. On this PC, record payments with Add.',
+          ),
+        ],
+      );
 }

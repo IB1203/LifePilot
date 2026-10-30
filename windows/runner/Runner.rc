@@ -89,13 +89,13 @@ BEGIN
     BEGIN
         BLOCK "040904e4"
         BEGIN
-            VALUE "CompanyName", "com.lifepilot.app" "\0"
-            VALUE "FileDescription", "lifepilot_ai" "\0"
+            VALUE "CompanyName", "IB1203" "\0"
+            VALUE "FileDescription", "LifePilot" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
-            VALUE "InternalName", "lifepilot_ai" "\0"
-            VALUE "LegalCopyright", "Copyright (C) 2026 com.lifepilot.app. All rights reserved." "\0"
-            VALUE "OriginalFilename", "lifepilot_ai.exe" "\0"
-            VALUE "ProductName", "lifepilot_ai" "\0"
+            VALUE "InternalName", "LifePilot" "\0"
+            VALUE "LegalCopyright", "Copyright (C) 2026 IB1203. MIT License." "\0"
+            VALUE "OriginalFilename", "LifePilot.exe" "\0"
+            VALUE "ProductName", "LifePilot" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END

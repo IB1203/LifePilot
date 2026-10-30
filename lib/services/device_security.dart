@@ -2,19 +2,25 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
 
 import '../core/secure.dart';
+import 'windows_key.dart';
 
 const _channel = MethodChannel('lifepilot/security');
 
 bool get _isAndroid =>
     !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
 
-/// Loads the device key that encrypts LifePilot's private files. Returns
-/// null where there is no platform key store (tests, desktop); throws if
-/// Android cannot provide it, so the caller does not mistake that for "no
+/// Loads the device key that encrypts LifePilot's private files (Android
+/// Keystore, or DPAPI on Windows). Returns null where there is no platform
+/// key store (tests, other desktops); throws if the key cannot be loaded, so the caller does not mistake that for "no
 /// encryption needed".
 Future<DataCipher?> loadDeviceCipher() async {
+  if (!kIsWeb && defaultTargetPlatform == TargetPlatform.windows) {
+    return DataCipher(
+        await windowsDataKey(await getApplicationSupportDirectory()));
+  }
   if (!_isAndroid) return null;
   final key = await _channel.invokeMethod<Uint8List>('dataKey');
   if (key == null || key.length != 32) {

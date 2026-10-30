@@ -74,7 +74,12 @@ class LocalReminderScheduler implements ReminderScheduler {
           AndroidFlutterLocalNotificationsPlugin>();
 
   static bool get isSupported =>
-      !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
+      !kIsWeb &&
+      (defaultTargetPlatform == TargetPlatform.android ||
+          defaultTargetPlatform == TargetPlatform.windows);
+
+  static bool get _windows =>
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.windows;
 
   @override
   Future<void> initialize(NotificationResponseHandler onResponse) async {
@@ -83,6 +88,11 @@ class LocalReminderScheduler implements ReminderScheduler {
     await _plugin.initialize(
       settings: const InitializationSettings(
         android: AndroidInitializationSettings('ic_stat_lifepilot'),
+        windows: WindowsInitializationSettings(
+          appName: 'LifePilot',
+          appUserModelId: 'IB1203.LifePilot',
+          guid: '6f1c2b4e-8d3a-4f6b-9c2e-1a5d7e9b3c40',
+        ),
       ),
       onDidReceiveNotificationResponse: (response) {
         final payload = response.payload;
@@ -114,7 +124,7 @@ class LocalReminderScheduler implements ReminderScheduler {
 
   @override
   Future<bool> requestPermission() async =>
-      await _android?.requestNotificationsPermission() ?? false;
+      _windows || (await _android?.requestNotificationsPermission() ?? false);
 
   @override
   Future<void> requestExactAlarms() async =>
@@ -122,6 +132,11 @@ class LocalReminderScheduler implements ReminderScheduler {
 
   @override
   Future<NotificationStatus> status() async {
+    if (_windows) {
+      // Windows has no per-app prompt; toasts follow system settings.
+      return const NotificationStatus(
+          supported: true, enabled: true, exactAlarms: true);
+    }
     final android = _android;
     if (android == null) {
       return const NotificationStatus(
@@ -158,7 +173,10 @@ class LocalReminderScheduler implements ReminderScheduler {
           title: item.title,
           body: item.body,
           payload: item.payload,
-          notificationDetails: NotificationDetails(android: _details(item)),
+          notificationDetails: NotificationDetails(
+            android: _details(item),
+            windows: const WindowsNotificationDetails(),
+          ),
           androidScheduleMode: !exact
               ? AndroidScheduleMode.inexactAllowWhileIdle
               : item.channel == ReminderChannel.alarms

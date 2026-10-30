@@ -5,6 +5,7 @@ import '../core/bank_sms.dart' show knownBankSenders;
 import '../core/local_store.dart';
 import '../services/sms_capture.dart';
 import '../ui/widgets.dart';
+import '../ui/platform.dart';
 
 /// Bank SMS: live capture, privacy, extra bank senders and category rules.
 class SmsSettingsPage extends StatelessWidget {
@@ -27,14 +28,15 @@ class SmsSettingsPage extends StatelessWidget {
               CardList(
                 indent: 56,
                 children: [
-                  SwitchListTile(
-                    secondary: const Icon(Icons.mark_email_unread_outlined),
-                    title: const Text('Read bank SMS as they arrive'),
-                    subtitle: const Text(
-                        'Bank and UPI messages become drafts for you to approve, with a notification. Other messages are ignored.'),
-                    value: settings.smsCapture,
-                    onChanged: (on) => _setCapture(context, on),
-                  ),
+                  if (!isDesktop)
+                    SwitchListTile(
+                      secondary: const Icon(Icons.mark_email_unread_outlined),
+                      title: const Text('Read bank SMS as they arrive'),
+                      subtitle: const Text(
+                          'Bank and UPI messages become drafts for you to approve, with a notification. Other messages are ignored.'),
+                      value: settings.smsCapture,
+                      onChanged: (on) => _setCapture(context, on),
+                    ),
                   SwitchListTile(
                     secondary: const Icon(Icons.notes_outlined),
                     title: const Text('Keep full message text'),

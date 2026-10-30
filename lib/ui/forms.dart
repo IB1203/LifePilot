@@ -12,6 +12,7 @@ import '../core/recurrence.dart';
 import '../services/receipts.dart';
 import '../services/reminder_coordinator.dart';
 import 'widgets.dart';
+import 'platform.dart';
 
 Future<T?> _sheet<T>(BuildContext context, Widget child) =>
     showModalBottomSheet<T>(
@@ -527,14 +528,15 @@ class _EntryFormState extends State<_EntryForm> {
           Wrap(
             spacing: 8,
             children: [
-              ActionChip(
-                avatar: const Icon(Icons.photo_camera_outlined, size: 18),
-                label: const Text('Photo receipt'),
-                onPressed: () => _attachReceipt(true),
-              ),
+              if (!isDesktop)
+                ActionChip(
+                  avatar: const Icon(Icons.photo_camera_outlined, size: 18),
+                  label: const Text('Photo receipt'),
+                  onPressed: () => _attachReceipt(true),
+                ),
               ActionChip(
                 avatar: const Icon(Icons.image_outlined, size: 18),
-                label: const Text('From gallery'),
+                label: Text(isDesktop ? 'Attach receipt' : 'From gallery'),
                 onPressed: () => _attachReceipt(false),
               ),
             ],

@@ -8,7 +8,18 @@ LifePilot is an offline-first personal finance, planning and time app. INR is th
 2. Open the downloaded file. If Android asks, allow your browser or file manager to **install unknown apps** (Settings › Apps › Special access › Install unknown apps).
 3. Tap **Install**, then **Open**.
 
-Needs Android 7.0 or newer. If Play Protect warns that the app is unknown, choose **More details › Install anyway**; LifePilot is not on Google Play. To update, install a newer `LifePilot.apk` over the old one; your data is kept.
+Needs Android 7.0 or newer. LifePilot is not on Google Play. To update, install a newer `LifePilot.apk` over the old one; your data is kept.
+
+**If Play Protect blocks the install.** In India, Play Protect blocks apps installed from outside the Play Store that can read SMS, which LifePilot's optional bank-SMS feature needs. To install:
+
+1. Open the **Play Store** › your profile picture › **Play Protect** › ⚙ (top right).
+2. Turn off **Scan apps with Play Protect**.
+3. Install `LifePilot.apk`.
+4. Turn **Scan apps with Play Protect** back on.
+
+LifePilot asks for SMS access only if you use the bank-SMS feature, and you can say no.
+
+**Xiaomi, POCO and Redmi phones:** if HyperOS asks to scan the app or sign in to a Xiaomi account first, you can sign in, or turn off **Security › Settings › Scan apps before installing** for the install. When paying by UPI, tap **Allow** on "Show all your UPI apps", or use **Other UPI app**.
 
 Everything stays on the phone: no account, no server, no ads. Camera, SMS and microphone are asked for only when you use the feature that needs them.
 
