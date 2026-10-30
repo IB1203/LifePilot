@@ -1,7 +1,7 @@
 name: lifepilot_ai
 description: Offline-first personal finance and productivity assistant.
 publish_to: none
-version: 1.0.0+2
+version: 1.0.1+3
 
 environment:
   sdk: '>=3.6.0 <4.0.0'

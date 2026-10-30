@@ -12,6 +12,9 @@
     <uses-permission android:name="android.permission.RECEIVE_SMS"/>
     <!-- Voice input for the assistant. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+    <!-- Xiaomi/POCO/Redmi (MIUI, HyperOS) hide other apps unless this is
+         granted; needed to list the user's UPI apps. Ignored elsewhere. -->
+    <uses-permission android:name="com.android.permission.GET_INSTALLED_APPS"/>
     <application
         android:label="LifePilot AI"
         android:name="${applicationName}"

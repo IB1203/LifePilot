@@ -20,6 +20,33 @@ private const val IS_SENSITIVE = "android.content.extra.IS_SENSITIVE"
 // FlutterFragmentActivity is required by local_auth for the biometric prompt.
 class MainActivity : FlutterFragmentActivity() {
     private var pendingUpi: MethodChannel.Result? = null
+    private var pendingPermission: MethodChannel.Result? = null
+
+    /** Xiaomi's app-list permission: "unsupported" on other phones. */
+    private fun appListAccess(): String {
+        try {
+            packageManager.getPermissionInfo(GET_INSTALLED_APPS, 0)
+        } catch (error: PackageManager.NameNotFoundException) {
+            return "unsupported"
+        }
+        return if (checkSelfPermission(GET_INSTALLED_APPS) == PackageManager.PERMISSION_GRANTED) {
+            "granted"
+        } else {
+            "denied"
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != APPS_PERMISSION_REQUEST) return
+        val result = pendingPermission ?: return
+        pendingPermission = null
+        result.success(appListAccess() == "granted")
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -56,6 +83,15 @@ class MainActivity : FlutterFragmentActivity() {
             .setMethodCallHandler { call, result ->
                 when (call.method) {
                     "apps" -> result.success(UpiApps.installed(this))
+                    "appListAccess" -> result.success(appListAccess())
+                    "requestAppListAccess" -> {
+                        if (appListAccess() != "denied" || pendingPermission != null) {
+                            result.success(appListAccess() == "granted")
+                        } else {
+                            pendingPermission = result
+                            requestPermissions(arrayOf(GET_INSTALLED_APPS), APPS_PERMISSION_REQUEST)
+                        }
+                    }
                     "pay" -> pay(call.argument<String>("uri")!!, call.argument<String>("package"), result)
                     else -> result.notImplemented()
                 }
@@ -99,8 +135,21 @@ class MainActivity : FlutterFragmentActivity() {
             result.error("busy", "A payment is already open", null)
             return
         }
-        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(uri))
-        if (packageName != null) intent.setPackage(packageName)
+        val view = Intent(Intent.ACTION_VIEW, Uri.parse(uri))
+        // Without a chosen app, Android's own picker lists every UPI app,
+        // even ones this app is not allowed to see.
+        val intent = if (packageName != null) {
+            view.setPackage(packageName)
+        } else {
+            Intent.createChooser(view, "Pay with")
+        }
+        // Only trust an empty result where the phone does not hide apps.
+        if (packageName == null && appListAccess() != "denied" &&
+            packageManager.queryIntentActivities(view, 0).isEmpty()
+        ) {
+            result.error("no_app", "No UPI app can open this payment", null)
+            return
+        }
         try {
             pendingUpi = result
             @Suppress("DEPRECATION")
@@ -137,6 +186,8 @@ class MainActivity : FlutterFragmentActivity() {
 
     companion object {
         private const val UPI_REQUEST = 4801
+        private const val APPS_PERMISSION_REQUEST = 4804
+        private const val GET_INSTALLED_APPS = "com.android.permission.GET_INSTALLED_APPS"
         const val OPEN_EXTRA = "lifepilot_open"
     }
 }

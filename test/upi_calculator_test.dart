@@ -305,4 +305,74 @@ void main() {
         .setMockMethodCallHandler(channel, null);
     debugDefaultTargetPlatformOverride = null;
   });
+
+  testWidgets('hidden apps: allow reveals them, Other UPI app is default',
+      (tester) async {
+    tester.view.physicalSize = const Size(1080, 2340);
+    tester.view.devicePixelRatio = 2.75;
+    addTearDown(tester.view.reset);
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    var granted = false;
+    Object? payPackage = 'unset';
+    const channel = MethodChannel('lifepilot/upi');
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel,
+        (call) async {
+      switch (call.method) {
+        case 'apps':
+          return granted
+              ? [
+                  {'package': 'com.phonepe.app', 'name': 'PhonePe'},
+                  {'package': 'com.flipkart.upi', 'name': 'Flipkart'},
+                ]
+              : [
+                  {'package': 'com.flipkart.upi', 'name': 'Flipkart'},
+                ];
+        case 'appListAccess':
+          return granted ? 'granted' : 'denied';
+        case 'requestAppListAccess':
+          granted = true;
+          return true;
+        case 'pay':
+          payPackage = (call.arguments as Map)['package'];
+          return {'ok': false, 'response': null};
+      }
+      return null;
+    });
+    final store = LifePilotStore.inMemory(clock: () => _now);
+    await tester.pumpWidget(MaterialApp(
+        home: UpiReviewPage(
+            store: store,
+            request: UpiRequest.parse('upi://pay?pa=shop@ybl&am=10'))));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Show all your UPI apps'), findsOneWidget);
+    expect(find.text('PhonePe'), findsNothing);
+    final otherChip = find.widgetWithText(ChoiceChip, 'Other UPI app');
+    await tester.scrollUntilVisible(otherChip, 200,
+        scrollable: find.byType(Scrollable).first);
+    final other = tester.widget<ChoiceChip>(otherChip);
+    expect(other.selected, isTrue, reason: 'no app is forced');
+
+    await tester.ensureVisible(find.text('Allow'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Allow'));
+    await tester.pumpAndSettle();
+    expect(find.text('PhonePe'), findsOneWidget);
+    expect(find.text('Show all your UPI apps'), findsNothing);
+
+    final pay = find.textContaining('Pay ₹10.00');
+    await tester.scrollUntilVisible(pay, 200,
+        scrollable: find.byType(Scrollable).first);
+    await tester.ensureVisible(pay);
+    await tester.pumpAndSettle();
+    await tester.tap(pay);
+    await tester.pumpAndSettle();
+    expect(payPackage, isNull, reason: 'Android picker shows every app');
+    await tester.tap(find.text('OK'));
+    await tester.pumpAndSettle();
+
+    tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, null);
+    debugDefaultTargetPlatformOverride = null;
+  });
 }

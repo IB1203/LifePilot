@@ -437,6 +437,9 @@ class _UpiReviewPageState extends State<UpiReviewPage> {
       !widget.request.isMerchant;
   List<UpiApp>? _apps;
   UpiApp? _app;
+
+  /// The phone (Xiaomi, POCO, Redmi) hides other apps until allowed.
+  bool _appsHidden = false;
   bool _paying = false;
 
   UpiRequest get _request => widget.request;
@@ -447,18 +450,34 @@ class _UpiReviewPageState extends State<UpiReviewPage> {
   @override
   void initState() {
     super.initState();
-    unawaited(installedUpiApps().then((apps) {
-      if (!mounted) return;
-      setState(() {
-        _apps = apps;
-        // Default to the app used last, if it is still installed.
-        final last = widget.store.handoffs
-            .map((handoff) => handoff.appName)
-            .firstWhere((name) => name.isNotEmpty, orElse: () => '');
-        _app = apps.where((app) => app.name == last).firstOrNull ??
-            (apps.length == 1 ? apps.single : null);
-      });
-    }));
+    unawaited(_loadApps());
+  }
+
+  Future<void> _loadApps() async {
+    final apps = await installedUpiApps();
+    final access = await upiAppListAccess();
+    if (!mounted) return;
+    setState(() {
+      _apps = apps;
+      _appsHidden = access == 'denied';
+      // Default to the app used last, if it is still installed; otherwise
+      // let Android show every UPI app.
+      final last = widget.store.handoffs
+          .map((handoff) => handoff.appName)
+          .firstWhere((name) => name.isNotEmpty, orElse: () => '');
+      _app = apps.where((app) => app.name == last).firstOrNull;
+    });
+  }
+
+  Future<void> _allowAppList() async {
+    final granted = await requestUpiAppListAccess();
+    if (!mounted) return;
+    if (granted) {
+      await _loadApps();
+    } else {
+      showMessage(context,
+          'Not allowed. You can still tap "Other UPI app" to pick from all your apps, or allow "Get installed apps" for LifePilot in Settings › Apps › Permissions.');
+    }
   }
 
   @override
@@ -689,13 +708,32 @@ class _UpiReviewPageState extends State<UpiReviewPage> {
           const SectionHeader(title: 'Pay with'),
           if (_apps == null)
             const LinearProgressIndicator()
-          else if (_apps!.isEmpty)
-            const Text('Android will ask which UPI app to use.')
-          else
+          else ...[
+            if (_appsHidden)
+              Card(
+                margin: const EdgeInsets.only(bottom: 8),
+                child: ListTile(
+                  leading: const Icon(Icons.apps_outlined),
+                  title: const Text('Show all your UPI apps'),
+                  subtitle: const Text(
+                      'Your phone hides other apps from LifePilot until you allow "Get installed apps".'),
+                  trailing: TextButton(
+                    onPressed: _allowAppList,
+                    child: const Text('Allow'),
+                  ),
+                ),
+              ),
             Wrap(
               spacing: 8,
               runSpacing: 8,
               children: [
+                ChoiceChip(
+                  avatar: const Icon(Icons.apps, size: 18),
+                  label: const Text('Other UPI app'),
+                  tooltip: 'Android shows all your UPI apps to choose from',
+                  selected: _app == null,
+                  onSelected: (_) => setState(() => _app = null),
+                ),
                 for (final app in _apps!)
                   ChoiceChip(
                     avatar: app.icon == null
@@ -708,6 +746,7 @@ class _UpiReviewPageState extends State<UpiReviewPage> {
                   ),
               ],
             ),
+          ],
           const SizedBox(height: 20),
           SizedBox(
             height: 52,

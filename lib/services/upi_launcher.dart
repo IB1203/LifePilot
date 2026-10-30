@@ -36,6 +36,30 @@ Future<List<UpiApp>> installedUpiApps() async {
   }
 }
 
+/// Whether this phone hides other apps from LifePilot. Xiaomi, POCO and
+/// Redmi phones (MIUI, HyperOS) need their "Get installed apps" permission
+/// before LifePilot can list UPI apps: 'denied', 'granted' or 'unsupported'.
+Future<String> upiAppListAccess() async {
+  if (!_isAndroid) return 'unsupported';
+  try {
+    return await _channel.invokeMethod<String>('appListAccess') ??
+        'unsupported';
+  } on Object {
+    return 'unsupported';
+  }
+}
+
+/// Asks for Xiaomi's "Get installed apps" permission. Returns whether it
+/// is granted.
+Future<bool> requestUpiAppListAccess() async {
+  if (!_isAndroid) return false;
+  try {
+    return await _channel.invokeMethod<bool>('requestAppListAccess') ?? false;
+  } on Object {
+    return false;
+  }
+}
+
 /// Thrown when no installed app can open the payment.
 class NoUpiAppException implements Exception {
   const NoUpiAppException();
