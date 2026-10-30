@@ -23,6 +23,14 @@ LifePilot asks for SMS access only if you use the bank-SMS feature, and you can 
 
 Everything stays on the phone: no account, no server, no ads. Camera, SMS and microphone are asked for only when you use the feature that needs them.
 
+## Install on Windows
+
+1. Download **`LifePilot-Setup.exe`** from **[the latest release](https://github.com/IB1203/LifePilot/releases/latest)**. Or use `LifePilot-Windows-portable.zip`, extract it, and run `LifePilot.exe`, with no install needed.
+2. Run it. Windows SmartScreen may say "Windows protected your PC" because the installer is not code-signed: choose **More info › Run anyway**.
+3. Open LifePilot from the Start menu.
+
+Needs 64-bit Windows 10 or 11. The Windows app keeps its own records, encrypted for your Windows account, and does not sync with the phone; move data with **More › Encrypted backup** and **Restore from file**. UPI payments, bank SMS and the camera work only in the Android app.
+
 ## Features
 
 - **Home:** greeting, live clock, next reminder with countdown, today's task overview, monthly finances and budget progress, daily planner, upcoming bills, insights, savings goals and recent transactions. Sections can be reordered or hidden.

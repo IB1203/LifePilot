@@ -1,0 +1,58 @@
+# Builds the Windows installer when a release is published, and attaches
+# LifePilot-Setup.exe and a portable ZIP to that release.
+name: Windows release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to attach the Windows build to (e.g. v1.0.2)
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.47.8
+          cache: true
+
+      - name: Build
+        run: |
+          flutter pub get
+          flutter build windows --release
+
+      - name: Bundle the Microsoft C++ runtime
+        shell: pwsh
+        run: |
+          $release = "build\windows\x64\runner\Release"
+          foreach ($dll in "msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll") {
+            Copy-Item "$env:WINDIR\System32\$dll" $release
+          }
+
+      - name: Make installer and ZIP
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          $version = $env:TAG.TrimStart('v')
+          New-Item -ItemType Directory -Force build\dist | Out-Null
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$version" windows\installer\LifePilot.iss
+          Compress-Archive -Path "build\windows\x64\runner\Release\*" -DestinationPath "build\dist\LifePilot-Windows-portable.zip"
+          Get-ChildItem build\dist | ForEach-Object { "{0}  {1}" -f $_.Name, (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower() }
+
+      - name: Attach to release
+        run: gh release upload "$env:TAG" build/dist/LifePilot-Setup.exe build/dist/LifePilot-Windows-portable.zip --clobber
