@@ -139,9 +139,7 @@ void main() {
           _now.subtract(const Duration(days: 2))),
     ]));
     expect(
-        store.bankBalances
-            .firstWhere((item) => item.bank == 'HDFC Bank')
-            .paise,
+        store.bankBalances.firstWhere((item) => item.bank == 'HDFC Bank').paise,
         1234500);
 
     // Survives backup and restore; can be forgotten.
@@ -230,6 +228,62 @@ void main() {
     expect(store.recurring.single.active, isFalse);
   });
 
+  testWidgets('money flow: this month by default, last 30 days on request',
+      (tester) async {
+    tester.view.physicalSize = const Size(1080, 2340);
+    tester.view.devicePixelRatio = 2.75;
+    addTearDown(tester.view.reset);
+    final local =
+        LifePilotStore.inMemory(clock: () => DateTime(2026, 11, 10, 12));
+    // Last month, but within the last 30 days.
+    await local.addEntry(
+        kind: EntryKind.expense,
+        amountPaise: 100000,
+        category: 'Food',
+        title: 'Groceries',
+        occurredAt: DateTime(2026, 10, 20));
+    await local.addEntry(
+        kind: EntryKind.expense,
+        amountPaise: 30000,
+        category: 'Food',
+        title: 'Lunch',
+        occurredAt: DateTime(2026, 11, 2));
+    await local.addRecurring(
+      kind: EntryKind.income,
+      amountPaise: 5000000,
+      category: 'Salary',
+      title: 'Salary',
+      recurrence: const Recurrence(Repeat.monthly),
+      firstDate: DateTime(2026, 11, 30),
+    );
+    await local.addRecurring(
+      kind: EntryKind.expense,
+      amountPaise: 50000,
+      category: 'Food',
+      title: 'Milk',
+      recurrence: const Recurrence(Repeat.weekly),
+      firstDate: DateTime(2026, 11, 13),
+    );
+    await tester.pumpWidget(MaterialApp(
+        theme: buildTheme(Brightness.light),
+        home: Scaffold(
+            body: ListView(children: [MoneyFlowSection(store: local)]))));
+    await tester.pumpAndSettle();
+    expect(find.text('November 2026'), findsOneWidget);
+    expect(find.text('₹300.00'), findsOneWidget);
+    // Milk on 13, 20 and 27 November; salary on the 30th.
+    expect(
+        find.text(
+            'Recurring still due this month: ₹50,000.00 in, ₹1,500.00 out.'),
+        findsOneWidget);
+
+    await tester.tap(find.text('30 days'));
+    await tester.pumpAndSettle();
+    expect(find.text('Last 30 days'), findsOneWidget);
+    expect(find.text('₹1,300.00'), findsOneWidget);
+    expect(find.textContaining('Recurring still due'), findsNothing);
+  });
+
   testWidgets('balances, money flow and recurring suggestions are shown',
       (tester) async {
     tester.view.physicalSize = const Size(1080, 2340);
@@ -257,7 +311,8 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Available balance'), findsOneWidget);
     expect(find.text('HDFC Bank ••5678'), findsOneWidget);
-    expect(find.text('Last 30 days'), findsOneWidget);
+    expect(find.text('October 2026'), findsOneWidget);
+    expect(find.text('This month'), findsOneWidget);
     final add = find.text('Add as recurring');
     await tester.scrollUntilVisible(add, 200,
         scrollable: find.byType(Scrollable).first);

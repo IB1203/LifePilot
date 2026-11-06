@@ -199,13 +199,13 @@ void main() {
 
     test('reads the balance in common bank formats', () {
       expectBalance('Debited INR 250. New bal: INR 9,750.00. Not you?', 975000);
-      expectBalance('Ref:430912345678. AvlBal:Rs9750.00(2026:10:29 14:22:11)',
-          975000);
+      expectBalance(
+          'Ref:430912345678. AvlBal:Rs9750.00(2026:10:29 14:22:11)', 975000);
       expectBalance('Total Avail.bal INR 8,800.00. - Canara Bank', 880000);
       expectBalance('Avl Bal Rs:5400.00.If not you, Call 1800222243', 540000);
       expectBalance('Avbl bal Rs 1,02,000', 10200000);
-      expectBalance('Paid Rs.250 from Paytm Balance. Updated Balance: Rs 100',
-          10000);
+      expectBalance(
+          'Paid Rs.250 from Paytm Balance. Updated Balance: Rs 100', 10000);
       expectBalance(
           'Your A/c XX1234 balance is Rs 5,000.00 as on 06-11-26', 500000);
     });
@@ -260,13 +260,37 @@ void main() {
           counterparty: 'ACME');
     });
 
+    test('"credited to <Bank> A/c" is the user\'s own account (Axis salary)',
+        () {
+      // Reported on a real phone; names, digits and link changed.
+      expectParsed(
+          'INR 20076.00 credited to Axis Bank A/c XX1234 on 01-11-26 at 21:09:35 IST. Ref: ACME TECHNOLO/ACME Sa.View bal: https://ccm.axis.bank.in/AXISBK/abc123',
+          kind: EntryKind.income,
+          paise: 2007600,
+          counterparty: 'ACME TECHNOLO',
+          account: '1234');
+      expect(
+          parseBankSms(
+                  'INR 20076.00 credited to Axis Bank A/c XX1234 on 01-11-26 at 21:09:35 IST.',
+                  received: DateTime(2026, 11, 1, 21, 10))!
+              .date,
+          DateTime(2026, 11, 1));
+      expect(
+          smsDirection(
+              'Rs 500 debited from your A/c XX1234 and credited to beneficiary A/c XX9876'),
+          EntryKind.expense);
+      expect(smsDirection('Rs 500 credited to VPA abc@ybl from A/c XX1234'),
+          EntryKind.expense);
+      expect(smsDirection('Rs 500 credited to Ravi Kumar via UPI'),
+          EntryKind.expense);
+    });
+
     test('noun forms: "has credit", "debit of"', () {
       expect(
           smsDirection(
               'Your A/C XXXXX1234 has credit for BY TRANSFER of Rs 500.00 on 29Oct26'),
           EntryKind.income);
-      expect(
-          smsDirection('There is a debit of Rs 500.00 in your A/c XX1234'),
+      expect(smsDirection('There is a debit of Rs 500.00 in your A/c XX1234'),
           EntryKind.expense);
       expect(smsDirection('Your credit card statement is ready'), isNull);
     });

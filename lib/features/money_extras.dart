@@ -4,6 +4,7 @@ import 'package:flutter_sms_inbox/flutter_sms_inbox.dart' hide SmsMessage;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../core/cash_plan.dart' show occurrences;
 import '../core/formatters.dart';
 import '../core/local_store.dart';
 import '../core/models.dart';
@@ -940,21 +941,55 @@ class BankBalancesSection extends StatelessWidget {
   }
 }
 
-/// Money credited and debited over the last 30 days, with what is still
-/// waiting for review.
-class MoneyFlowSection extends StatelessWidget {
+/// Money credited and debited this month (default) or over the last 30
+/// days, with what is still waiting for review. This month also shows the
+/// recurring income and payments still due before the month ends.
+class MoneyFlowSection extends StatefulWidget {
   const MoneyFlowSection({required this.store, super.key});
 
   final LifePilotStore store;
 
   @override
+  State<MoneyFlowSection> createState() => _MoneyFlowSectionState();
+}
+
+enum _FlowPeriod { thisMonth, last30Days }
+
+class _MoneyFlowSectionState extends State<MoneyFlowSection> {
+  var _period = _FlowPeriod.thisMonth;
+
+  @override
   Widget build(BuildContext context) {
-    final today = dateOnly(store.now());
-    final since = today.subtract(const Duration(days: 29));
-    bool recent(LedgerEntry entry) => !entry.occurredAt.isBefore(since);
-    final recorded = store.entries.where(recent).toList();
-    final waiting = store.pending.map((draft) => draft.entry).where(recent);
-    if (recorded.isEmpty && waiting.isEmpty) return const SizedBox.shrink();
+    final store = widget.store;
+    final now = store.now();
+    final today = dateOnly(now);
+    final month = _period == _FlowPeriod.thisMonth;
+    final since = month
+        ? DateTime(now.year, now.month)
+        : today.subtract(const Duration(days: 29));
+    final until = DateTime(today.year, today.month, today.day + 1);
+    bool inPeriod(LedgerEntry entry) =>
+        !entry.occurredAt.isBefore(since) && entry.occurredAt.isBefore(until);
+    final recorded = store.entries.where(inPeriod).toList();
+    final waiting = store.pending.map((draft) => draft.entry).where(inPeriod);
+    // Recurring income and payments still to come this month, from today.
+    final monthEnd = DateTime(now.year, now.month + 1, 0);
+    var dueIn = 0;
+    var dueOut = 0;
+    if (month) {
+      for (final rule in store.recurring.where((rule) => rule.active)) {
+        final count =
+            occurrences(rule.nextDate, rule.recurrence, today, monthEnd).length;
+        if (rule.kind == EntryKind.income) {
+          dueIn += count * rule.amountPaise;
+        } else {
+          dueOut += count * rule.amountPaise;
+        }
+      }
+    }
+    if (recorded.isEmpty && waiting.isEmpty && dueIn == 0 && dueOut == 0) {
+      return const SizedBox.shrink();
+    }
     int total(Iterable<LedgerEntry> items, bool income) => items
         .where((entry) => entry.isIncome == income)
         .fold(0, (sum, entry) => sum + entry.amountPaise);
@@ -967,7 +1002,34 @@ class MoneyFlowSection extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const SectionHeader(title: 'Last 30 days'),
+        Padding(
+          padding: const EdgeInsets.only(top: 8, bottom: 8),
+          // Wraps the switch under the heading on narrow screens.
+          child: Wrap(
+            alignment: WrapAlignment.spaceBetween,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            spacing: 12,
+            runSpacing: 6,
+            children: [
+              Text(month ? monthLabel(now) : 'Last 30 days',
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w700,
+                      )),
+              SegmentedButton<_FlowPeriod>(
+                showSelectedIcon: false,
+                segments: const [
+                  ButtonSegment(
+                      value: _FlowPeriod.thisMonth, label: Text('This month')),
+                  ButtonSegment(
+                      value: _FlowPeriod.last30Days, label: Text('30 days')),
+                ],
+                selected: {_period},
+                onSelectionChanged: (value) =>
+                    setState(() => _period = value.first),
+              ),
+            ],
+          ),
+        ),
         TileGrid(
           children: [
             StatTile(
@@ -999,6 +1061,17 @@ class MoneyFlowSection extends StatelessWidget {
             style: Theme.of(context).textTheme.bodySmall,
           ),
         ),
+        if (dueIn > 0 || dueOut > 0)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 4),
+            child: Text(
+              'Recurring still due this month: ${[
+                if (dueIn > 0) '${formatMoney(dueIn)} in',
+                if (dueOut > 0) '${formatMoney(dueOut)} out',
+              ].join(', ')}.',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ),
       ],
     );
   }

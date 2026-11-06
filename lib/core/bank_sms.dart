@@ -255,9 +255,13 @@ final _credit = RegExp(
     caseSensitive: false);
 
 /// "credited to VPA x@y" / "credited to beneficiary": the payee's side of a
-/// payment the user made. "credited to your a/c" / "to A/c XX1234" is not.
+/// payment the user made. "credited to your a/c", "to A/c XX1234" and
+/// "to Axis Bank A/c XX1234" (an account named within a few words) are the
+/// user's own account, so the money came in.
 final _creditedToPayee = RegExp(
-    r'\bcredited\s+to\s+(?!(?:your|ur|the|my|sb|savings?|current|salary|nre|nro|a/?c|acct|account|card|wallet)\b|[x*]+\d)\S',
+    r'\bcredited\s+to\s+(?:(?:vpa|beneficiary|payee|merchant)\b'
+    r'|(?!(?:your|ur|the|my|sb|savings?|current|salary|nre|nro|a/?c|acct|account|card|wallet)\b|[x*]+\d)'
+    r'(?!(?:[A-Za-z&.]+\s+){0,3}(?:a/?c|acct|account|card|wallet)\b)\S)',
     caseSensitive: false);
 
 /// "...; SWIGGY credited." Names such as "Your a/c" or "Rs 500" are
@@ -359,6 +363,9 @@ final _incomeName = [
   RegExp(r'\bby\s+(?:vpa\s+)?([A-Za-z0-9@._&\- ]{2,40}?)' + _stop,
       caseSensitive: false),
   RegExp(r'\binfo[:\-]\s*([A-Za-z0-9@._&\- /]{2,40})', caseSensitive: false),
+  // Axis NEFT credits: "Ref: ACME TECHNOLO/ACME Sa." names the payer.
+  RegExp(r'\bref[:\-]\s*([A-Za-z][A-Za-z &._]{2,40}?)(?=\s*/|\s*\.|\s*$)',
+      caseSensitive: false),
 ];
 
 String _clean(String value) => value
