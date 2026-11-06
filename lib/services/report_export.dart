@@ -69,7 +69,7 @@ class MonthlyReport {
 /// Amounts for files: the built-in PDF fonts have no rupee glyph, so a
 /// non-ASCII symbol is written as "Rs.".
 String _money(int paise) {
-  final text = formatMoney(paise);
+  final text = formatMoney(paise, reveal: true);
   return MoneyFormat.symbol == '₹' ? text.replaceFirst('₹', 'Rs. ') : text;
 }
 

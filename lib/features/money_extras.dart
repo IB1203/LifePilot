@@ -10,11 +10,13 @@ import '../core/models.dart';
 import '../core/personal.dart';
 import '../core/sms_import.dart';
 import '../core/recurrence.dart';
+import '../core/recurring_detect.dart';
 import '../services/device_security.dart';
 import '../ui/forms.dart';
 import '../ui/theme.dart';
 import '../ui/widgets.dart';
 import 'sms_settings_page.dart';
+import 'statement_import_flow.dart';
 import '../ui/platform.dart';
 
 // ---------------------------------------------------------------------------
@@ -430,15 +432,40 @@ class RecurringTab extends StatelessWidget {
     final colors = AppColors.of(context);
     final rules = [...store.recurring]
       ..sort((a, b) => a.nextDate.compareTo(b.nextDate));
+    var monthlyIn = 0;
+    var monthlyOut = 0;
+    for (final rule in rules.where((rule) => rule.active)) {
+      final monthly =
+          monthlyEquivalent(rule.amountPaise, rule.recurrence.repeat);
+      if (rule.kind == EntryKind.income) {
+        monthlyIn += monthly;
+      } else {
+        monthlyOut += monthly;
+      }
+    }
     return ListView(
       padding: pagePadding,
       children: [
+        BankBalancesSection(store: store),
         PendingDraftsSection(store: store),
         SuspiciousSmsSection(store: store),
+        MoneyFlowSection(store: store),
+        RecurringSuggestionsSection(store: store),
         SectionHeader(
             title: 'Recurring income and expenses',
             action: 'Add',
             onAction: () => showRecurringForm(context, store)),
+        if (monthlyIn > 0 || monthlyOut > 0)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Text(
+              'Each month: ${[
+                if (monthlyIn > 0) 'about ${formatMoney(monthlyIn)} in',
+                if (monthlyOut > 0) 'about ${formatMoney(monthlyOut)} out',
+              ].join(', ')}.',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ),
         if (rules.isEmpty)
           EmptyState(
             icon: Icons.autorenew,
@@ -468,7 +495,13 @@ class RecurringTab extends StatelessWidget {
                   trailing: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Text(formatMoney(rule.amountPaise)),
+                      Text(
+                        '${rule.kind == EntryKind.income ? '+' : '−'}${formatMoney(rule.amountPaise)}',
+                        style: TextStyle(
+                            color: rule.kind == EntryKind.income
+                                ? colors.income
+                                : null),
+                      ),
                       PopupMenuButton<String>(
                         tooltip: 'Recurring options',
                         onSelected: (value) async {
@@ -505,7 +538,7 @@ class RecurringTab extends StatelessWidget {
                 ),
             ],
           ),
-        const SectionHeader(title: 'Bank SMS'),
+        const SectionHeader(title: 'Bank SMS and statements'),
         Card(
           child: Padding(
             padding: const EdgeInsets.all(16),
@@ -529,6 +562,11 @@ class RecurringTab extends StatelessWidget {
                       onPressed: () => importPastedSms(context, store),
                       icon: const Icon(Icons.content_paste),
                       label: const Text('Paste messages'),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed: () => importStatement(context, store),
+                      icon: const Icon(Icons.description_outlined),
+                      label: const Text('Import statement'),
                     ),
                     TextButton.icon(
                       onPressed: () => Navigator.push(
@@ -692,20 +730,35 @@ class PendingDraftsSection extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Pill(
-                      icon: switch (draft.source) {
-                        'sms' => Icons.sms_outlined,
-                        'upi' => Icons.qr_code_2,
-                        _ => Icons.autorenew,
-                      },
-                      label: switch (draft.source) {
-                        'sms' => 'From SMS',
-                        'upi' when draft.bankConfirmed =>
-                          'UPI payment · confirmed by bank SMS',
-                        'upi' => 'UPI app report · not bank-verified',
-                        _ => 'Recurring',
-                      },
-                      color: draft.bankConfirmed ? colors.income : null,
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 4,
+                      children: [
+                        Pill(
+                          icon: switch (draft.source) {
+                            'sms' => Icons.sms_outlined,
+                            'statement' => Icons.description_outlined,
+                            'upi' => Icons.qr_code_2,
+                            _ => Icons.autorenew,
+                          },
+                          label: switch (draft.source) {
+                            'sms' when draft.recurringId != null =>
+                              'From SMS · matches a recurring entry',
+                            'sms' => 'From SMS',
+                            'statement' => 'From bank statement',
+                            'upi' when draft.bankConfirmed =>
+                              'UPI payment · confirmed by bank SMS',
+                            'upi' => 'UPI app report · not bank-verified',
+                            _ when draft.bankConfirmed =>
+                              'Recurring · confirmed by bank SMS',
+                            _ => 'Recurring',
+                          },
+                          color: draft.bankConfirmed ? colors.income : null,
+                        ),
+                        if (draft.autoPay)
+                          const Pill(
+                              icon: Icons.event_repeat, label: 'Autopay'),
+                      ],
                     ),
                     const SizedBox(height: 6),
                     Row(
@@ -733,9 +786,13 @@ class PendingDraftsSection extends StatelessWidget {
                     ),
                     const SizedBox(height: 4),
                     Text(
-                        '${draft.entry.category} · ${formatDate(draft.entry.occurredAt)}'
+                        '${draft.entry.isIncome ? 'Credited' : 'Debited'} · ${draft.entry.category} · ${formatDate(draft.entry.occurredAt)}'
                         '${store.accountById(draft.entry.accountId) == null ? '' : ' · ${store.accountById(draft.entry.accountId)!.name}'}',
                         style: Theme.of(context).textTheme.bodySmall),
+                    if (draft.balancePaise != null)
+                      Text(
+                          'Available balance after: ${formatMoney(draft.balancePaise!)}',
+                          style: Theme.of(context).textTheme.bodySmall),
                     if (draft.warning.isNotEmpty)
                       Padding(
                         padding: const EdgeInsets.only(top: 6),
@@ -808,6 +865,239 @@ class PendingDraftsSection extends StatelessWidget {
   }
 }
 
+/// The latest available balance (or card limit) each bank SMS reported,
+/// next to the balance LifePilot has recorded for the matching account.
+class BankBalancesSection extends StatelessWidget {
+  const BankBalancesSection({required this.store, super.key});
+
+  final LifePilotStore store;
+
+  @override
+  Widget build(BuildContext context) {
+    if (store.bankBalances.isEmpty) return const SizedBox.shrink();
+    final colors = AppColors.of(context);
+    final now = store.now();
+    final balances = [...store.bankBalances]
+      ..sort((a, b) => b.at.compareTo(a.at));
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SectionHeader(
+          title: 'Available balance',
+          action: 'Forget',
+          onAction: () async {
+            if (await confirmAction(context,
+                title: 'Forget bank balances?',
+                message:
+                    'Removes the balances read from bank SMS. They come back the next time a bank message mentions one.',
+                confirmLabel: 'Forget')) {
+              await store.forgetBankBalances();
+            }
+          },
+        ),
+        CardList(
+          indent: 56,
+          children: [
+            for (final balance in balances)
+              Builder(builder: (context) {
+                final hint = balance.accountHint;
+                final account = hint == null
+                    ? null
+                    : store.accounts
+                        .where((item) =>
+                            !item.archived && item.name.contains(hint))
+                        .firstOrNull;
+                final recorded = account == null
+                    ? null
+                    : accountBalance(account, store.entries, store.transfers);
+                final stale = now.difference(balance.at).inDays >= 7;
+                return ListTile(
+                  leading: Icon(balance.isLimit
+                      ? Icons.credit_card
+                      : Icons.account_balance_outlined),
+                  title: Text(balance.label),
+                  subtitle: Text([
+                    '${balance.isLimit ? 'Available credit limit' : 'Available balance'} · from SMS on ${formatDate(balance.at)}',
+                    if (stale) 'May be out of date',
+                    if (recorded != null && !balance.isLimit)
+                      recorded == balance.paise
+                          ? 'Matches ${account!.name} in LifePilot'
+                          : '${account!.name} in LifePilot: ${formatMoney(recorded)} (${formatMoney((balance.paise - recorded).abs())} ${balance.paise > recorded ? 'more' : 'less'} at the bank)',
+                  ].join('\n')),
+                  isThreeLine: stale || recorded != null,
+                  trailing: Text(
+                    formatMoney(balance.paise),
+                    style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                        fontWeight: FontWeight.w700,
+                        color: balance.paise < 0 ? colors.expense : null),
+                  ),
+                );
+              }),
+          ],
+        ),
+      ],
+    );
+  }
+}
+
+/// Money credited and debited over the last 30 days, with what is still
+/// waiting for review.
+class MoneyFlowSection extends StatelessWidget {
+  const MoneyFlowSection({required this.store, super.key});
+
+  final LifePilotStore store;
+
+  @override
+  Widget build(BuildContext context) {
+    final today = dateOnly(store.now());
+    final since = today.subtract(const Duration(days: 29));
+    bool recent(LedgerEntry entry) => !entry.occurredAt.isBefore(since);
+    final recorded = store.entries.where(recent).toList();
+    final waiting = store.pending.map((draft) => draft.entry).where(recent);
+    if (recorded.isEmpty && waiting.isEmpty) return const SizedBox.shrink();
+    int total(Iterable<LedgerEntry> items, bool income) => items
+        .where((entry) => entry.isIncome == income)
+        .fold(0, (sum, entry) => sum + entry.amountPaise);
+    final credited = total(recorded, true);
+    final debited = total(recorded, false);
+    final waitingIn = total(waiting, true);
+    final waitingOut = total(waiting, false);
+    final colors = AppColors.of(context);
+    final net = credited - debited;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const SectionHeader(title: 'Last 30 days'),
+        TileGrid(
+          children: [
+            StatTile(
+              label: 'Credited',
+              value: formatMoney(credited),
+              icon: Icons.south_west,
+              color: colors.income,
+              caption: waitingIn > 0
+                  ? '+${formatMoney(waitingIn)} awaiting review'
+                  : '${recorded.where((entry) => entry.isIncome).length} recorded',
+            ),
+            StatTile(
+              label: 'Debited',
+              value: formatMoney(debited),
+              icon: Icons.north_east,
+              color: colors.expense,
+              caption: waitingOut > 0
+                  ? '+${formatMoney(waitingOut)} awaiting review'
+                  : '${recorded.where((entry) => !entry.isIncome).length} recorded',
+            ),
+          ],
+        ),
+        Padding(
+          padding: const EdgeInsets.only(top: 6, bottom: 4),
+          child: Text(
+            net >= 0
+                ? 'You kept ${formatMoney(net)} of what came in.'
+                : 'You spent ${formatMoney(-net)} more than came in.',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Payments from the user's history that repeat at a steady rhythm, offered
+/// as recurring entries.
+class RecurringSuggestionsSection extends StatelessWidget {
+  const RecurringSuggestionsSection({required this.store, super.key});
+
+  final LifePilotStore store;
+
+  @override
+  Widget build(BuildContext context) {
+    final suggestions = store.recurringSuggestions();
+    if (suggestions.isEmpty) return const SizedBox.shrink();
+    final colors = AppColors.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const SectionHeader(title: 'Looks recurring'),
+        Padding(
+          padding: const EdgeInsets.only(bottom: 8),
+          child: Text(
+              'Found in your history. Add one to get a draft each time it is due, matched to your bank SMS.',
+              style: Theme.of(context).textTheme.bodySmall),
+        ),
+        for (final suggestion in suggestions)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Card(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 12, 8, 4),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(
+                          suggestion.kind == EntryKind.income
+                              ? Icons.south_west
+                              : Icons.north_east,
+                          size: 18,
+                          color: suggestion.kind == EntryKind.income
+                              ? colors.income
+                              : colors.expense,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(suggestion.title,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: Theme.of(context).textTheme.titleSmall),
+                        ),
+                        Text(
+                          '${suggestion.amountVaries ? '≈ ' : ''}${formatMoney(suggestion.amountPaise)}',
+                          style: Theme.of(context)
+                              .textTheme
+                              .titleSmall
+                              ?.copyWith(fontWeight: FontWeight.w700),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      '${Recurrence(suggestion.repeat).label} · seen ${suggestion.occurrences} times, last ${formatDate(suggestion.lastDate)} · next ${formatDate(suggestion.nextDate)}',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                    OverflowBar(
+                      alignment: MainAxisAlignment.end,
+                      children: [
+                        TextButton(
+                          onPressed: () =>
+                              store.dismissSuggestion(suggestion.key),
+                          child: const Text('Not recurring'),
+                        ),
+                        FilledButton.tonal(
+                          onPressed: () async {
+                            final rule =
+                                await store.acceptSuggestion(suggestion);
+                            if (context.mounted) {
+                              showMessage(context,
+                                  'Added “${rule.title}” · next ${formatDate(rule.nextDate)}');
+                            }
+                          },
+                          child: const Text('Add as recurring'),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
 const _recurringRepeats = [
   Recurrence(Repeat.weekly),
   Recurrence(Repeat.monthly),
@@ -817,24 +1107,53 @@ const _recurringRepeats = [
 ];
 
 Future<void> showRecurringForm(BuildContext context, LifePilotStore store,
-    {RecurringEntry? rule}) async {
-  final title = TextEditingController(text: rule?.title ?? '');
-  final amount = TextEditingController(
-      text: rule == null ? '' : paiseToInput(rule.amountPaise));
-  var kind = rule?.kind ?? EntryKind.expense;
-  var category = rule?.category ??
+        {RecurringEntry? rule}) =>
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => _RecurringForm(store: store, rule: rule),
+    );
+
+/// Owns its text controllers so they are disposed only after the sheet has
+/// finished closing, not while its exit animation still uses them.
+class _RecurringForm extends StatefulWidget {
+  const _RecurringForm({required this.store, this.rule});
+
+  final LifePilotStore store;
+  final RecurringEntry? rule;
+
+  @override
+  State<_RecurringForm> createState() => _RecurringFormState();
+}
+
+class _RecurringFormState extends State<_RecurringForm> {
+  late final title = TextEditingController(text: widget.rule?.title ?? '');
+  late final amount = TextEditingController(
+      text: widget.rule == null ? '' : paiseToInput(widget.rule!.amountPaise));
+  late var kind = widget.rule?.kind ?? EntryKind.expense;
+  late var category = widget.rule?.category ??
       (store.categories.contains('Bills') ? 'Bills' : store.categories.first);
-  var recurrence = rule == null
+  late var recurrence = widget.rule == null
       ? const Recurrence(Repeat.monthly)
-      : Recurrence(rule.recurrence.repeat);
-  var date = rule?.nextDate ?? dateOnly(store.now());
-  String? accountId = rule?.accountId;
+      : Recurrence(widget.rule!.recurrence.repeat);
+  late var date = widget.rule?.nextDate ?? dateOnly(store.now());
+  late String? accountId = widget.rule?.accountId;
   final formKey = GlobalKey<FormState>();
-  await showModalBottomSheet<void>(
-    context: context,
-    isScrollControlled: true,
-    builder: (sheetContext) => StatefulBuilder(
-      builder: (sheetContext, setSheetState) => Padding(
+
+  LifePilotStore get store => widget.store;
+  RecurringEntry? get rule => widget.rule;
+
+  @override
+  void dispose() {
+    title.dispose();
+    amount.dispose();
+    super.dispose();
+  }
+
+  void setSheetState(VoidCallback change) => setState(change);
+
+  @override
+  Widget build(BuildContext sheetContext) => Padding(
         padding: EdgeInsets.fromLTRB(
             20, 0, 20, 20 + MediaQuery.viewInsetsOf(sheetContext).bottom),
         child: Form(
@@ -944,6 +1263,7 @@ Future<void> showRecurringForm(BuildContext context, LifePilotStore store,
                 onPressed: () async {
                   if (!formKey.currentState!.validate()) return;
                   final paise = parseRupeesToPaise(amount.text)!;
+                  final rule = this.rule;
                   if (rule == null) {
                     await store.addRecurring(
                       kind: kind,
@@ -965,7 +1285,8 @@ Future<void> showRecurringForm(BuildContext context, LifePilotStore store,
                       nextDate: dateOnly(date),
                       accountId: accountId,
                       paymentMethod: rule.paymentMethod,
-                      active: true,
+                      // Editing a paused entry keeps it paused.
+                      active: rule.active,
                     ));
                   }
                   if (sheetContext.mounted) Navigator.pop(sheetContext);
@@ -975,11 +1296,7 @@ Future<void> showRecurringForm(BuildContext context, LifePilotStore store,
             ],
           ),
         ),
-      ),
-    ),
-  );
-  title.dispose();
-  amount.dispose();
+      );
 }
 
 // ---------------------------------------------------------------------------

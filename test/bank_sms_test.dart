@@ -185,6 +185,124 @@ void main() {
     });
   });
 
+  group('available balance', () {
+    void expectBalance(String body, int? paise, {bool limit = false}) {
+      final balance = smsBalance(body);
+      if (paise == null) {
+        expect(balance, isNull, reason: body);
+        return;
+      }
+      expect(balance, isNotNull, reason: body);
+      expect(balance!.paise, paise, reason: body);
+      expect(balance.isLimit, limit, reason: body);
+    }
+
+    test('reads the balance in common bank formats', () {
+      expectBalance('Debited INR 250. New bal: INR 9,750.00. Not you?', 975000);
+      expectBalance('Ref:430912345678. AvlBal:Rs9750.00(2026:10:29 14:22:11)',
+          975000);
+      expectBalance('Total Avail.bal INR 8,800.00. - Canara Bank', 880000);
+      expectBalance('Avl Bal Rs:5400.00.If not you, Call 1800222243', 540000);
+      expectBalance('Avbl bal Rs 1,02,000', 10200000);
+      expectBalance('Paid Rs.250 from Paytm Balance. Updated Balance: Rs 100',
+          10000);
+      expectBalance(
+          'Your A/c XX1234 balance is Rs 5,000.00 as on 06-11-26', 500000);
+    });
+
+    test('card limits, owed balances and look-alikes', () {
+      expectBalance('INR 1,499 spent. Avl Lmt INR 50,000', 5000000,
+          limit: true);
+      // An account balance wins over a credit limit in the same message.
+      expectBalance('Avl Lmt INR 50,000. Avl Bal INR 2,000.00', 200000);
+      expectBalance('Avl bal:INR 1,000.00 Dr', -100000);
+      expectBalance('Minimum balance Rs 10,000 not maintained', null);
+      expectBalance('Your loan outstanding balance Rs 2,00,000', null);
+      expectBalance('Rs 500 debited. Not you? Call 1800', null);
+    });
+
+    test('a parsed transaction carries its balance', () {
+      final parsed = parseBankSms(
+          'Rs.2000.00 withdrawn at ATM S1AW000123 from A/c XX1234 on 29-10-26. Avl bal Rs 8,000.00',
+          received: _received);
+      expect(parsed!.balance!.paise, 800000);
+      expect(parsed.amountPaise, 200000);
+    });
+  });
+
+  group('credited or debited', () {
+    test('a balance marked CR does not turn a debit into a credit', () {
+      expectParsed(
+          'Avl Bal Rs 9,000 CR. Rs 500 debited from A/c XX1234 at SHOP',
+          kind: EntryKind.expense,
+          paise: 50000,
+          counterparty: 'SHOP',
+          account: '1234');
+    });
+
+    test('"credited to" a payee is money going out', () {
+      expectParsed(
+          'Rs 500.00 credited to abc@ybl from your A/c XX1234. UPI Ref 430912345680',
+          kind: EntryKind.expense,
+          paise: 50000,
+          counterparty: 'abc@ybl');
+      expectParsed('Rs 500.00 credited to your A/c XX1234 from abc@ybl',
+          kind: EntryKind.income, paise: 50000, counterparty: 'abc@ybl');
+      expect(
+          smsDirection(
+              'Your a/c no. XXXXXX4321 is credited with Rs 50,000.00 on 01-11-26 from ACME CORP.'),
+          EntryKind.income,
+          reason: '"no. XXXXXX4321 is" is the account, not a payee');
+      expectParsed(
+          'Dear Customer. Rs 500 credited to your a/c XX1234 by NEFT from ACME',
+          kind: EntryKind.income,
+          paise: 50000,
+          counterparty: 'ACME');
+    });
+
+    test('noun forms: "has credit", "debit of"', () {
+      expect(
+          smsDirection(
+              'Your A/C XXXXX1234 has credit for BY TRANSFER of Rs 500.00 on 29Oct26'),
+          EntryKind.income);
+      expect(
+          smsDirection('There is a debit of Rs 500.00 in your A/c XX1234'),
+          EntryKind.expense);
+      expect(smsDirection('Your credit card statement is ready'), isNull);
+    });
+
+    test('executed autopay is kept, mandate set-up is ignored', () {
+      final debit = parseBankSms(
+          'Rs 649.00 debited from A/c XX1234 towards NETFLIX e-mandate. UMRN ABC123',
+          received: _received);
+      expect(debit!.kind, EntryKind.expense);
+      expect(debit.amountPaise, 64900);
+      expect(debit.isAutoPay, isTrue);
+      expect(
+          parseBankSms(
+              'Your e-mandate for Rs 649.00 towards NETFLIX has been registered successfully.',
+              received: _received),
+          isNull);
+      expect(
+          parseBankSms(
+              'Rs 649.00 will be debited on 05-11-26 via e-mandate for NETFLIX.',
+              received: _received),
+          isNull);
+    });
+
+    test('credit card bill payments are flagged, card purchases are not', () {
+      final payment = parseBankSms(
+          'Payment of Rs 5,000.00 received on your HDFC Bank Credit Card XX5678 on 29-10-26.',
+          received: _received);
+      expect(payment!.isCardBillPayment, isTrue);
+      final purchase = parseBankSms(
+          'Rs 1,200 paid to BESCOM bill payment via credit card XX5678',
+          received: _received);
+      expect(purchase!.kind, EntryKind.expense);
+      expect(purchase.isCardBillPayment, isFalse);
+    });
+  });
+
   group('senders and scams', () {
     test('recognises bank sender IDs', () {
       final hdfc = classifySender('VM-HDFCBK-S');

@@ -4,13 +4,20 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 
+import 'debts.dart';
 import 'finance_calc.dart';
 import 'formatters.dart';
+import 'investments.dart';
 import 'models.dart';
 import 'recurrence.dart';
+import 'recurring_detect.dart';
 import 'reminder_plan.dart';
 import 'secure.dart';
 import 'sms_import.dart';
+import 'spending_habits.dart';
+import 'statement_import.dart';
+import 'tax_rules.dart';
+import 'vault.dart';
 import 'upi.dart';
 
 /// The single source of truth for on-device records. Data is kept in memory
@@ -48,6 +55,7 @@ class LifePilotStore extends ChangeNotifier {
     'Interest',
     'Gifts',
     'Refunds',
+    'Loans',
     'Other',
   ];
 
@@ -76,8 +84,32 @@ class LifePilotStore extends ChangeNotifier {
   final List<SuspiciousSms> suspiciousSms = [];
   final List<CategoryRule> categoryRules = [];
 
-  /// Fingerprints of SMS messages already turned into drafts or dismissed.
+  /// Fingerprints of SMS messages and statement rows already turned into
+  /// drafts or dismissed.
   final Set<String> seenSms = {};
+
+  /// Latest balance or card limit each bank SMS reported, by account.
+  final List<BankBalance> bankBalances = [];
+
+  /// Recurring suggestions the user said are not recurring.
+  final Set<String> dismissedSuggestions = {};
+
+  /// Loans, card dues, and money borrowed or lent.
+  final List<Debt> debts = [];
+
+  /// Investments with values the user enters.
+  final List<Investment> investments = [];
+
+  /// Tax and GST rules the user imported or edited, as JSON by financial
+  /// year. They replace the built-in rules for that year.
+  final Map<String, String> taxRuleOverrides = {};
+
+  /// Trips with their own budget.
+  final List<Trip> trips = [];
+
+  /// Documents and warranties; files are stored encrypted, outside the
+  /// records file.
+  final List<VaultItem> vault = [];
   AppSettings settings = const AppSettings();
   ClockState clock = const ClockState();
   String? storageError;
@@ -164,6 +196,7 @@ class LifePilotStore extends ChangeNotifier {
           'Saved data could not be read. It has been left untouched.';
     }
     MoneyFormat.symbol = store.settings.currencySymbol;
+    MoneyFormat.hidden = store.settings.hideAmounts;
     return store;
   }
 
@@ -262,6 +295,33 @@ class LifePilotStore extends ChangeNotifier {
     final storedSms = root['seenSms'];
     final decodedSms =
         storedSms is List ? storedSms.whereType<String>().toSet() : <String>{};
+    final decodedBalances =
+        _readList(root, 'bankBalances', BankBalance.fromJson);
+    final decodedDebts = _readList(root, 'debts', Debt.fromJson);
+    final decodedInvestments =
+        _readList(root, 'investments', Investment.fromJson);
+    final decodedTrips = _readList(root, 'trips', Trip.fromJson);
+    final decodedVault = _readList(root, 'vault', VaultItem.fromJson);
+    final storedRules = root['taxRules'];
+    final decodedTaxRules = <String, String>{
+      if (storedRules is Map)
+        for (final entry in storedRules.entries)
+          if (entry.key is String && entry.value is String)
+            entry.key as String: entry.value as String,
+    };
+    // A stored file that no longer validates is dropped, not trusted.
+    decodedTaxRules.removeWhere((_, source) {
+      try {
+        parseTaxRules(source);
+        return false;
+      } on FormatException {
+        return true;
+      }
+    });
+    final storedDismissed = root['dismissedSuggestions'];
+    final decodedDismissed = storedDismissed is List
+        ? storedDismissed.whereType<String>().toSet()
+        : <String>{};
     final storedCategories = root['categories'];
     final decodedCategories = storedCategories is List
         ? storedCategories.whereType<String>().toList()
@@ -297,7 +357,15 @@ class LifePilotStore extends ChangeNotifier {
     suspiciousSms.addAll(decodedSuspicious);
     categoryRules.addAll(decodedRules);
     seenSms.addAll(decodedSms);
+    bankBalances.addAll(decodedBalances);
+    debts.addAll(decodedDebts);
+    investments.addAll(decodedInvestments);
+    taxRuleOverrides.addAll(decodedTaxRules);
+    trips.addAll(decodedTrips);
+    vault.addAll(decodedVault);
+    dismissedSuggestions.addAll(decodedDismissed);
     MoneyFormat.symbol = settings.currencySymbol;
+    MoneyFormat.hidden = settings.hideAmounts;
   }
 
   void _resetCollections() {
@@ -320,6 +388,13 @@ class LifePilotStore extends ChangeNotifier {
     suspiciousSms.clear();
     categoryRules.clear();
     seenSms.clear();
+    bankBalances.clear();
+    dismissedSuggestions.clear();
+    debts.clear();
+    investments.clear();
+    taxRuleOverrides.clear();
+    trips.clear();
+    vault.clear();
     categories
       ..clear()
       ..addAll(defaultCategories);
@@ -374,6 +449,10 @@ class LifePilotStore extends ChangeNotifier {
         clock: clock,
         now: now(),
         use24h: settings.use24HourClock,
+        extra: [
+          ...maturityReminders(investments, now()),
+          ...expiryReminders(vault, now()),
+        ],
       );
 
   LocalTask? taskById(String id) {
@@ -402,12 +481,14 @@ class LifePilotStore extends ChangeNotifier {
     String paymentMethod = 'Other',
     String note = '',
     String merchant = '',
+    String subcategory = '',
     String? billId,
     String? accountId,
     String? receiptPath,
     String? source,
   }) async {
     final entry = LedgerEntry(
+      subcategory: subcategory.trim(),
       id: _newId(),
       kind: kind,
       amountPaise: amountPaise,
@@ -425,6 +506,17 @@ class LifePilotStore extends ChangeNotifier {
     entries.add(entry);
     await _changed();
     return entry;
+  }
+
+  /// Subcategories used before in [category], most used first.
+  List<String> subcategoriesOf(String category) {
+    final counts = <String, int>{};
+    for (final entry in entries) {
+      if (entry.category != category || entry.subcategory.isEmpty) continue;
+      counts.update(entry.subcategory, (value) => value + 1, ifAbsent: () => 1);
+    }
+    return (counts.keys.toList()
+      ..sort((a, b) => counts[b]!.compareTo(counts[a]!)));
   }
 
   Future<void> updateEntry(LedgerEntry updated) async {
@@ -917,6 +1009,7 @@ class LifePilotStore extends ChangeNotifier {
   Future<void> updateSettings(AppSettings value) async {
     settings = value;
     MoneyFormat.symbol = value.currencySymbol;
+    MoneyFormat.hidden = value.hideAmounts;
     await _changed();
   }
 
@@ -1237,21 +1330,66 @@ class LifePilotStore extends ChangeNotifier {
   /// Creates drafts for recurring occurrences that are due today or earlier.
   /// Returns how many were created. Safe to call repeatedly.
   Future<int> prepareDueRecurring() async {
-    final created = _prepareRecurring();
-    if (created > 0) await _changed();
-    return created;
+    final result = _prepareRecurring();
+    if (result.changed) await _changed();
+    return result.created;
   }
 
-  int _prepareRecurring() {
+  /// Drafts due occurrences. [changed] is also true when a rule moved on
+  /// without a new draft, because the payment was already recorded or a
+  /// bank SMS draft was labelled with the rule instead.
+  ({int created, bool changed}) _prepareRecurring() {
     final today = dateOnly(now());
     var created = 0;
+    var changed = false;
     for (var i = 0; i < recurring.length; i++) {
       var rule = recurring[i];
       if (!rule.active) continue;
       // Cap catch-up so a rule left for years cannot flood the inbox.
       for (var step = 0; step < 24 && !rule.nextDate.isAfter(today); step++) {
         final key = 'recurring:${rule.id}:${rule.nextDate.toIso8601String()}';
-        if (!pending.any((item) => item.sourceKey == key)) {
+        final due = DateTime(
+            rule.nextDate.year, rule.nextDate.month, rule.nextDate.day, 9);
+        bool expected(LedgerEntry entry) => matchesRecurring(
+              kind: rule.kind,
+              amountPaise: rule.amountPaise,
+              title: rule.title,
+              due: due,
+              entry: entry,
+            );
+        // The bank SMS for this payment may have arrived first (salary a
+        // day early): label that draft instead of drafting it twice.
+        final smsDraft = pending.indexWhere((item) =>
+            item.source != 'recurring' &&
+            item.recurringId == null &&
+            expected(item.entry));
+        // Or it was already recorded, by hand or from SMS. Expenses need a
+        // matching name here, so an unrelated payment of the same amount
+        // does not swallow the draft.
+        final recorded = entries.any((entry) =>
+            entry.source != 'recurring' &&
+            matchesRecurring(
+              kind: rule.kind,
+              amountPaise: rule.amountPaise,
+              title: rule.title,
+              due: due,
+              entry: entry,
+              requireName: true,
+            ));
+        if (smsDraft >= 0 || recorded) changed = true;
+        if (smsDraft >= 0) {
+          final draft = pending[smsDraft];
+          pending[smsDraft] = draft.copyWith(
+            recurringId: rule.id,
+            entry: draft.entry.copyWith(
+              title: rule.title,
+              category: rule.category,
+              accountId: draft.entry.accountId ?? rule.accountId,
+            ),
+          );
+        } else if (recorded) {
+          // Nothing to draft.
+        } else if (!pending.any((item) => item.sourceKey == key)) {
           pending.add(PendingEntry(
             id: _newId(),
             source: 'recurring',
@@ -1277,11 +1415,12 @@ class LifePilotStore extends ChangeNotifier {
         rule = next == null
             ? rule.copyWith(active: false)
             : rule.copyWith(nextDate: next);
+        changed = true;
         if (next == null) break;
       }
       recurring[i] = rule;
     }
-    return created;
+    return (created: created, changed: changed || created > 0);
   }
 
   /// Adds SMS-derived drafts, skipping messages already seen.
@@ -1309,7 +1448,7 @@ class LifePilotStore extends ChangeNotifier {
   /// UPI drafts and held-back suspicious messages. Every message used is
   /// remembered by fingerprint so it is never imported twice.
   Future<void> applySmsImport(SmsImport import) async {
-    if (import.handled.isEmpty) return;
+    if (import.handled.isEmpty && import.balances.isEmpty) return;
     for (final draft in import.drafts) {
       pending.add(PendingEntry(
         id: _newId(),
@@ -1319,7 +1458,38 @@ class LifePilotStore extends ChangeNotifier {
         sourceKey: draft.sourceKey,
         sourceText: draft.sourceText,
         warning: draft.warning,
+        balancePaise: draft.balancePaise,
+        autoPay: draft.autoPay,
       ));
+    }
+    for (final match in import.recurringMatches) {
+      final index = pending.indexWhere((draft) => draft.id == match.pendingId);
+      if (index < 0) continue;
+      final draft = pending[index];
+      final expected = draft.entry.amountPaise;
+      pending[index] = draft.copyWith(
+        bankConfirmed: true,
+        // The bank's amount and date are what actually happened.
+        entry: draft.entry.copyWith(
+          amountPaise: match.amountPaise,
+          occurredAt: match.occurredAt,
+          note: match.note.isEmpty ? null : match.note,
+          merchant: match.merchant.isEmpty ? null : match.merchant,
+        ),
+        sourceText: match.sourceText,
+        balancePaise: match.balancePaise,
+        warning: match.amountPaise == expected
+            ? null
+            : 'Your bank shows ${formatMoney(match.amountPaise)}; the recurring entry expects ${formatMoney(expected)}. Edit the recurring entry if the amount has changed.',
+      );
+    }
+    for (final balance in import.balances.values) {
+      final index = bankBalances.indexWhere((item) => item.key == balance.key);
+      if (index < 0) {
+        bankBalances.add(balance);
+      } else if (!balance.at.isBefore(bankBalances[index].at)) {
+        bankBalances[index] = balance;
+      }
     }
     for (final confirmation in import.confirmations) {
       final index =
@@ -1341,6 +1511,367 @@ class LifePilotStore extends ChangeNotifier {
       suspiciousSms.removeRange(50, suspiciousSms.length);
     }
     seenSms.addAll(import.handled);
+    await _changed();
+  }
+
+  /// Payments that look recurring but are not yet recurring entries.
+  List<RecurringSuggestion> recurringSuggestions() => suggestRecurring(
+        entries: entries,
+        rules: recurring,
+        now: now(),
+        dismissed: dismissedSuggestions,
+      );
+
+  /// Turns a suggestion into a recurring entry, starting at its next date.
+  Future<RecurringEntry> acceptSuggestion(RecurringSuggestion suggestion) =>
+      addRecurring(
+        kind: suggestion.kind,
+        amountPaise: suggestion.amountPaise,
+        category: suggestion.category,
+        title: suggestion.title,
+        recurrence: Recurrence(suggestion.repeat),
+        firstDate: suggestion.nextDate,
+        accountId: accountById(suggestion.accountId)?.id,
+        paymentMethod: suggestion.paymentMethod,
+      );
+
+  Future<void> dismissSuggestion(String key) async {
+    dismissedSuggestions.add(key);
+    await _changed();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Debts
+
+  Future<Debt> addDebt({
+    required String name,
+    required DebtKind kind,
+    required int openingPaise,
+    required DateTime startDate,
+    double annualRatePercent = 0,
+    int emiPaise = 0,
+    String counterparty = '',
+  }) async {
+    final debt = Debt(
+      id: _newId(),
+      name: name.trim(),
+      kind: kind,
+      openingPaise: openingPaise,
+      startDate: dateOnly(startDate),
+      annualRatePercent: annualRatePercent,
+      emiPaise: emiPaise,
+      counterparty: counterparty.trim(),
+    );
+    debts.add(debt);
+    await _changed();
+    return debt;
+  }
+
+  Future<void> updateDebt(Debt updated) async {
+    final index = debts.indexWhere((item) => item.id == updated.id);
+    if (index < 0) throw StateError('That debt no longer exists.');
+    debts[index] = updated;
+    await _changed();
+  }
+
+  Future<void> deleteDebt(String id) async {
+    debts.removeWhere((item) => item.id == id);
+    await _changed();
+  }
+
+  /// Records a repayment. For money the user owes, it can also be recorded
+  /// as an expense (category Loans). A debt paid off is marked closed.
+  Future<Debt> addDebtPayment(
+    String debtId, {
+    required int amountPaise,
+    DateTime? at,
+    String note = '',
+    bool recordExpense = false,
+    String? accountId,
+  }) async {
+    final index = debts.indexWhere((item) => item.id == debtId);
+    if (index < 0) throw StateError('That debt no longer exists.');
+    final debt = debts[index];
+    final when = at ?? now();
+    var updated = debt.copyWith(payments: [
+      ...debt.payments,
+      DebtPayment(
+          id: _newId(), amountPaise: amountPaise, at: when, note: note.trim()),
+    ]);
+    if (debtStatus(updated).outstandingPaise <= 0) {
+      updated = updated.copyWith(closed: true);
+    }
+    debts[index] = updated;
+    if (recordExpense && !debt.owedToMe) {
+      entries.add(LedgerEntry(
+        id: _newId(),
+        kind: EntryKind.expense,
+        amountPaise: amountPaise,
+        category: 'Loans',
+        title: debt.kind == DebtKind.creditCard
+            ? '${debt.name} payment'
+            : '${debt.name} EMI',
+        occurredAt: when,
+        note: note.trim(),
+        accountId: accountId,
+      ));
+    }
+    await _changed();
+    return updated;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Investments
+
+  /// Adds an investment. [investedPaise] (for an FD, the principal) is
+  /// recorded as money put in on [startDate].
+  Future<Investment> addInvestment({
+    required String name,
+    required InvestmentKind kind,
+    required DateTime startDate,
+    int investedPaise = 0,
+    int? valuePaise,
+    double annualRatePercent = 0,
+    DateTime? maturityDate,
+    int installmentPaise = 0,
+    int sipPaise = 0,
+    int? sipDay,
+  }) async {
+    final item = Investment(
+      id: _newId(),
+      name: name.trim(),
+      kind: kind,
+      flows: [
+        if (investedPaise > 0 && kind != InvestmentKind.recurringDeposit)
+          InvestmentFlow(
+              id: _newId(),
+              amountPaise: investedPaise,
+              at: dateOnly(startDate)),
+      ],
+      valuePaise: kind.isDeposit ? null : valuePaise,
+      valueAsOf: kind.isDeposit || valuePaise == null ? null : now(),
+      annualRatePercent: annualRatePercent,
+      startDate: dateOnly(startDate),
+      maturityDate: maturityDate == null ? null : dateOnly(maturityDate),
+      installmentPaise: installmentPaise,
+      sipPaise: sipPaise,
+      sipDay: sipPaise > 0 ? sipDay : null,
+    );
+    investments.add(item);
+    await _changed();
+    return item;
+  }
+
+  Future<void> updateInvestment(Investment updated) async {
+    final index = investments.indexWhere((item) => item.id == updated.id);
+    if (index < 0) throw StateError('That investment no longer exists.');
+    investments[index] = updated;
+    await _changed();
+  }
+
+  Future<void> deleteInvestment(String id) async {
+    investments.removeWhere((item) => item.id == id);
+    await _changed();
+  }
+
+  /// Money put in (positive) or taken out (negative). The current value
+  /// moves by the same amount, since the user's last value no longer
+  /// includes it.
+  Future<void> addInvestmentFlow(String id, int amountPaise,
+      {DateTime? at}) async {
+    final index = investments.indexWhere((item) => item.id == id);
+    if (index < 0) throw StateError('That investment no longer exists.');
+    final item = investments[index];
+    investments[index] = item.copyWith(
+      flows: [
+        ...item.flows,
+        InvestmentFlow(id: _newId(), amountPaise: amountPaise, at: at ?? now()),
+      ],
+      valuePaise:
+          item.valuePaise == null ? null : item.valuePaise! + amountPaise,
+    );
+    await _changed();
+  }
+
+  Future<void> setInvestmentValue(String id, int valuePaise) async {
+    final index = investments.indexWhere((item) => item.id == id);
+    if (index < 0) throw StateError('That investment no longer exists.');
+    investments[index] =
+        investments[index].copyWith(valuePaise: valuePaise, valueAsOf: now());
+    await _changed();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Documents and warranties
+
+  Future<VaultItem> addVaultItem({
+    required String title,
+    required VaultKind kind,
+    String? filePath,
+    String? fileName,
+    DateTime? purchaseDate,
+    DateTime? expiryDate,
+    int? amountPaise,
+    String notes = '',
+  }) async {
+    final item = VaultItem(
+      id: _newId(),
+      title: title.trim(),
+      kind: kind,
+      createdAt: now(),
+      filePath: filePath,
+      fileName: fileName,
+      purchaseDate: purchaseDate == null ? null : dateOnly(purchaseDate),
+      expiryDate: expiryDate == null ? null : dateOnly(expiryDate),
+      amountPaise: amountPaise,
+      notes: notes.trim(),
+    );
+    vault.add(item);
+    await _changed();
+    return item;
+  }
+
+  /// Removes the record; returns its file path so the caller can delete it.
+  Future<String?> deleteVaultItem(String id) async {
+    final index = vault.indexWhere((item) => item.id == id);
+    if (index < 0) return null;
+    final item = vault.removeAt(index);
+    await _changed();
+    return item.filePath;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Trips
+
+  Future<Trip> addTrip({
+    required String name,
+    required DateTime start,
+    required DateTime end,
+    required int budgetPaise,
+  }) async {
+    final trip = Trip(
+      id: _newId(),
+      name: name.trim(),
+      start: dateOnly(start),
+      end: dateOnly(end),
+      budgetPaise: budgetPaise,
+    );
+    trips.add(trip);
+    await _changed();
+    return trip;
+  }
+
+  Future<void> deleteTrip(String id) async {
+    trips.removeWhere((item) => item.id == id);
+    await _changed();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Tax and GST rules
+
+  /// The rules JSON in use for [financialYear]: the user's own if they
+  /// imported or edited one, else the built-in rules for that year, else
+  /// the latest built-in year (with [exact] false).
+  ({String source, bool custom, bool exact}) taxRulesFor(String financialYear) {
+    final own = taxRuleOverrides[financialYear];
+    if (own != null) return (source: own, custom: true, exact: true);
+    final builtIn = builtInTaxRules[financialYear];
+    if (builtIn != null) return (source: builtIn, custom: false, exact: true);
+    final latest = (builtInTaxRules.keys.toList()..sort()).last;
+    return (source: builtInTaxRules[latest]!, custom: false, exact: false);
+  }
+
+  /// Validates and saves rules for the year named inside them. Throws
+  /// [FormatException] and changes nothing if they are invalid.
+  Future<TaxRules> saveTaxRules(String source) async {
+    final rules = parseTaxRules(source);
+    taxRuleOverrides[rules.financialYear] =
+        const JsonEncoder.withIndent('  ').convert(jsonDecode(source));
+    await _changed();
+    return rules;
+  }
+
+  Future<void> resetTaxRules(String financialYear) async {
+    taxRuleOverrides.remove(financialYear);
+    await _changed();
+  }
+
+  /// Splits a bill the user paid: their share is recorded as an expense and
+  /// each other person's share as money lent to them.
+  Future<void> splitBill({
+    required String title,
+    required int totalPaise,
+    required List<String> people,
+    required String category,
+    DateTime? at,
+    String? accountId,
+  }) async {
+    final names = [
+      for (final name in people)
+        if (name.trim().isNotEmpty) name.trim(),
+    ];
+    if (names.isEmpty) throw ArgumentError('Add at least one other person.');
+    final when = at ?? now();
+    final share = totalPaise ~/ (names.length + 1);
+    // The user's share absorbs any paise left over from dividing.
+    final mine = totalPaise - share * names.length;
+    entries.add(LedgerEntry(
+      id: _newId(),
+      kind: EntryKind.expense,
+      amountPaise: mine,
+      category: category,
+      title: title.trim(),
+      occurredAt: when,
+      note:
+          'Your share of ${formatMoney(totalPaise, reveal: true)}, split ${names.length + 1} ways',
+      accountId: accountId,
+    ));
+    for (final name in names) {
+      debts.add(Debt(
+        id: _newId(),
+        name: '${title.trim()} · $name',
+        kind: DebtKind.lent,
+        openingPaise: share,
+        startDate: dateOnly(when),
+        counterparty: name,
+      ));
+    }
+    await _changed();
+  }
+
+  /// Saves a statement import: new drafts, the rows' keys so a re-import
+  /// skips them, and the closing balance under [balanceLabel] (usually the
+  /// account's name).
+  Future<void> applyStatementImport(StatementImport import,
+      {String balanceLabel = 'Bank statement'}) async {
+    for (final draft in import.drafts) {
+      pending.add(PendingEntry(
+        id: _newId(),
+        entry: draft.entry,
+        source: draft.source,
+        createdAt: draft.createdAt,
+        sourceKey: draft.sourceKey,
+        sourceText: draft.sourceText,
+        balancePaise: draft.balancePaise,
+      ));
+    }
+    seenSms.addAll(import.keys);
+    final closing = import.closing;
+    if (closing != null) {
+      final balance =
+          BankBalance(bank: balanceLabel, paise: closing.paise, at: closing.at);
+      final index = bankBalances.indexWhere((item) => item.key == balance.key);
+      if (index < 0) {
+        bankBalances.add(balance);
+      } else if (!balance.at.isBefore(bankBalances[index].at)) {
+        bankBalances[index] = balance;
+      }
+    }
+    await _changed();
+  }
+
+  Future<void> forgetBankBalances() async {
+    bankBalances.clear();
     await _changed();
   }
 
@@ -1391,6 +1922,7 @@ class LifePilotStore extends ChangeNotifier {
       note: values.note,
       paymentMethod: values.paymentMethod,
       merchant: values.merchant,
+      subcategory: values.subcategory,
       accountId: values.accountId,
       receiptPath: values.receiptPath,
       source: draft.source,
@@ -1495,6 +2027,13 @@ class LifePilotStore extends ChangeNotifier {
         'suspiciousSms': suspiciousSms.map((item) => item.toJson()).toList(),
         'categoryRules': categoryRules.map((item) => item.toJson()).toList(),
         'seenSms': seenSms.toList(),
+        'bankBalances': bankBalances.map((item) => item.toJson()).toList(),
+        'dismissedSuggestions': dismissedSuggestions.toList(),
+        'debts': debts.map((item) => item.toJson()).toList(),
+        'investments': investments.map((item) => item.toJson()).toList(),
+        'taxRules': taxRuleOverrides,
+        'trips': trips.map((item) => item.toJson()).toList(),
+        'vault': vault.map((item) => item.toJson()).toList(),
       };
 
   Recurrence _anchored(Recurrence recurrence, DateTime? date) {

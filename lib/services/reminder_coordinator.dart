@@ -12,6 +12,7 @@ import 'home_widget_service.dart';
 import 'notification_service.dart';
 import 'receipts.dart';
 import 'sms_capture.dart';
+import 'vault_files.dart';
 
 /// Keeps scheduled notifications in line with the store, handles taps and
 /// actions on notifications, and finishes timers that end while the app is
@@ -57,6 +58,10 @@ class ReminderCoordinator with WidgetsBindingObserver {
             if (entry.receiptPath != null) entry.receiptPath!,
           for (final draft in store.pending)
             if (draft.entry.receiptPath != null) draft.entry.receiptPath!,
+        });
+        await cleanOrphanVaultFiles({
+          for (final item in store.vault)
+            if (item.filePath != null) item.filePath!,
         });
       }());
     }

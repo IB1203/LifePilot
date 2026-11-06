@@ -1,3 +1,4 @@
+import 'assistant_insights.dart';
 import 'finance_calc.dart';
 import 'formatters.dart';
 import 'local_store.dart';
@@ -6,6 +7,10 @@ import 'models.dart';
 import 'personal.dart';
 import 'recurrence.dart';
 import 'task_logic.dart';
+
+/// The assistant always shows real amounts, even with "Hide amounts" on:
+/// the user asked, and confirmations must show what will be recorded.
+String _money(int paise) => formatMoney(paise, reveal: true);
 
 /// A write the assistant proposes. Nothing is saved until the user confirms
 /// and [AssistantEngine.execute] runs it through the store.
@@ -509,7 +514,11 @@ class AssistantEngine {
       '• Add electricity bill 1200 due on 5th\n'
       '• Add 2000 to my emergency fund\n'
       '• Start a 10 minute timer · Start focus\n'
-      '• Mark report as done · Delete my last expense';
+      '• Mark report as done · Delete my last expense\n'
+      '• Can I afford ₹50,000? · Where can I cut back?\n'
+      '• Any unusual transactions? · What will I spend by month end?\n'
+      '• How are my debts? · What is my net worth?\n'
+      '• How are my investments? · Show my subscriptions';
 
   AssistantReply handle(String input) {
     final text = input.trim();
@@ -544,6 +553,11 @@ class AssistantEngine {
             caseSensitive: false)
         .firstMatch(text);
     if (task != null) return _taskRequest(task.group(1)!, now, remind: false);
+
+    // Money questions first: "Can I buy a phone for 50000?" is a question,
+    // not an expense to record.
+    final money = answerMoneyQuestion(store, text);
+    if (money != null) return AssistantReply(money);
 
     final special = _billRequest(text, now) ??
         _goalRequest(text) ??
@@ -647,7 +661,7 @@ class AssistantEngine {
       name = '$name bill';
     }
     return AssistantReply(
-      'Bill “$name” for ${formatMoney(amount)}, ${recurrence.isNone ? 'one time' : recurrence.label.toLowerCase()}, next due ${formatDate(due)}. Confirm to start tracking it.',
+      'Bill “$name” for ${_money(amount)}, ${recurrence.isNone ? 'one time' : recurrence.label.toLowerCase()}, next due ${formatDate(due)}. Confirm to start tracking it.',
       proposal: AddBillAction(
         name: name,
         kind: kind,
@@ -677,7 +691,7 @@ class AssistantEngine {
     final goal = goals.single;
     final after = goal.savedPaise + amount;
     return AssistantReply(
-      'Add ${formatMoney(amount)} to “${goal.name}”? It would reach ${formatMoney(after)} of ${formatMoney(goal.targetPaise)}.',
+      'Add ${_money(amount)} to “${goal.name}”? It would reach ${_money(after)} of ${_money(goal.targetPaise)}.',
       proposal: GoalContributionAction(
           goalId: goal.id, goalName: goal.name, amountPaise: amount),
     );
@@ -732,7 +746,7 @@ class AssistantEngine {
     }
     final entry = candidates.last;
     return AssistantReply(
-      'Delete the most recently added ${entry.isIncome ? 'income' : 'expense'}: “${entry.title}”, ${formatMoney(entry.amountPaise)} on ${formatDate(entry.occurredAt)}? This cannot be undone here.',
+      'Delete the most recently added ${entry.isIncome ? 'income' : 'expense'}: “${entry.title}”, ${_money(entry.amountPaise)} on ${formatDate(entry.occurredAt)}? This cannot be undone here.',
       proposal: DeleteEntryAction(entry: entry),
     );
   }
@@ -936,9 +950,9 @@ class AssistantEngine {
         window: const Duration(hours: 12));
     final warning = duplicates.isEmpty
         ? null
-        : 'A similar ${kind.name} of ${formatMoney(amount)} (“${duplicates.first.title}”) was recorded ${friendlyDay(duplicates.first.occurredAt, now).toLowerCase()}.';
+        : 'A similar ${kind.name} of ${_money(amount)} (“${duplicates.first.title}”) was recorded ${friendlyDay(duplicates.first.occurredAt, now).toLowerCase()}.';
     return AssistantReply(
-      'I prepared ${kind == EntryKind.income ? 'income' : 'an expense'} of ${formatMoney(amount)} in $category for ${friendlyDay(occurredAt, now).toLowerCase()}. Nothing is saved until you confirm.',
+      'I prepared ${kind == EntryKind.income ? 'income' : 'an expense'} of ${_money(amount)} in $category for ${friendlyDay(occurredAt, now).toLowerCase()}. Nothing is saved until you confirm.',
       proposal: AddEntryAction(
         kind: kind,
         amountPaise: amount,
@@ -964,14 +978,14 @@ class AssistantEngine {
         if (store.billById(bill.id) == null) {
           return 'The bill could not be verified after saving. Please check Finance › Bills.';
         }
-        return 'Tracking “${bill.name}”: ${formatMoney(bill.amountPaise)}, next due ${formatDate(bill.nextDueAt)}. You will be reminded ${bill.remindDaysBefore} days before, if notifications are allowed.';
+        return 'Tracking “${bill.name}”: ${_money(bill.amountPaise)}, next due ${formatDate(bill.nextDueAt)}. You will be reminded ${bill.remindDaysBefore} days before, if notifications are allowed.';
       case GoalContributionAction():
         await store.contributeToGoal(action.goalId, action.amountPaise,
             note: 'Added by assistant');
         final goal =
             store.goals.where((item) => item.id == action.goalId).firstOrNull;
         if (goal == null) return 'That goal no longer exists.';
-        return 'Added ${formatMoney(action.amountPaise)} to “${goal.name}”. Saved ${formatMoney(goal.savedPaise)} of ${formatMoney(goal.targetPaise)} (${(goal.progress * 100).round()}%).';
+        return 'Added ${_money(action.amountPaise)} to “${goal.name}”. Saved ${_money(goal.savedPaise)} of ${_money(goal.targetPaise)} (${(goal.progress * 100).round()}%).';
       case StartTimerAction():
         if (action.focus) {
           await store.focusStart(kind: FocusKind.focus, label: action.label);
@@ -1002,7 +1016,7 @@ class AssistantEngine {
         await store.deleteEntry(action.entry.id);
         return store.entries.any((entry) => entry.id == action.entry.id)
             ? 'The entry could not be deleted.'
-            : 'Deleted “${action.entry.title}” (${formatMoney(action.entry.amountPaise)}).';
+            : 'Deleted “${action.entry.title}” (${_money(action.entry.amountPaise)}).';
       case AddEntryAction():
         final saved = await store.addEntry(
           kind: action.kind,
@@ -1016,8 +1030,8 @@ class AssistantEngine {
           return 'The transaction could not be verified after saving. Please check Finance.';
         }
         final monthTotal = store.spentInCategory(saved.category);
-        return 'Saved ${saved.isIncome ? 'income' : 'expense'} “${saved.title}” for ${formatMoney(saved.amountPaise)} (${saved.category}, ${formatDate(saved.occurredAt)}).'
-            '${saved.isIncome ? '' : '\n${saved.category} spending this month: ${formatMoney(monthTotal)}.'}';
+        return 'Saved ${saved.isIncome ? 'income' : 'expense'} “${saved.title}” for ${_money(saved.amountPaise)} (${saved.category}, ${formatDate(saved.occurredAt)}).'
+            '${saved.isIncome ? '' : '\n${saved.category} spending this month: ${_money(monthTotal)}.'}';
       case AddTaskAction():
         final saved = await store.addTask(
           title: action.title,
@@ -1058,8 +1072,8 @@ class AssistantEngine {
     if (lower.contains('goal') || lower.contains('saving')) return _goals(now);
     if (RegExp(r'\b(cash ?flow|balance|net)\b').hasMatch(lower)) {
       final summary = store.thisMonth;
-      return 'Recorded cash flow in ${monthLabel(now)}: ${formatMoney(summary.netCashFlow)}\n'
-          '(${formatMoney(summary.income)} income − ${formatMoney(summary.expenses)} expenses). '
+      return 'Recorded cash flow in ${monthLabel(now)}: ${_money(summary.netCashFlow)}\n'
+          '(${_money(summary.income)} income − ${_money(summary.expenses)} expenses). '
           'This is not net worth or a bank balance.';
     }
     if (RegExp(r'\b(spend|spent|expense|expenses|spending)\b')
@@ -1116,15 +1130,14 @@ class AssistantEngine {
       return 'No ${noun.toLowerCase()}$scope recorded for ${period.label}.';
     }
     final buffer = StringBuffer(
-        '$noun$scope recorded for ${period.label}: ${formatMoney(total)} across $count ${count == 1 ? 'entry' : 'entries'}.');
+        '$noun$scope recorded for ${period.label}: ${_money(total)} across $count ${count == 1 ? 'entry' : 'entries'}.');
     if (category == null) {
       final top = categoryTotals(store.entries, period.range, kind: kind)
           .entries
           .take(3);
       buffer.write('\nTop categories: ');
-      buffer.write(top
-          .map((item) => '${item.key} ${formatMoney(item.value)}')
-          .join(' · '));
+      buffer.write(
+          top.map((item) => '${item.key} ${_money(item.value)}').join(' · '));
     }
     return buffer.toString();
   }
@@ -1151,13 +1164,13 @@ class AssistantEngine {
     final direction = difference == 0
         ? 'the same as'
         : difference > 0
-            ? '${formatMoney(difference)} more than'
-            : '${formatMoney(-difference)} less than';
+            ? '${_money(difference)} more than'
+            : '${_money(-difference)} less than';
     final buffer = StringBuffer(
-        'So far in ${monthLabel(now)} (1–${now.day}): ${formatMoney(thisTotal)}.\n'
-        'Same period of ${monthLabel(previousStart)} (1–$sameDay): ${formatMoney(lastToDate)}.\n'
+        'So far in ${monthLabel(now)} (1–${now.day}): ${_money(thisTotal)}.\n'
+        'Same period of ${monthLabel(previousStart)} (1–$sameDay): ${_money(lastToDate)}.\n'
         'You have spent $direction last month at this point.\n'
-        'All of ${monthLabel(previousStart)}: ${formatMoney(lastFull)}.');
+        'All of ${monthLabel(previousStart)}: ${_money(lastFull)}.');
     final currentCategories = categoryTotals(store.entries, current);
     final previousCategories = categoryTotals(store.entries, previousToDate);
     final changes = {
@@ -1174,7 +1187,7 @@ class AssistantEngine {
       buffer.write(changes
           .take(3)
           .map((item) =>
-              '${item.key} ${item.value > 0 ? '+' : '−'}${formatMoney(item.value.abs())}')
+              '${item.key} ${item.value > 0 ? '+' : '−'}${_money(item.value.abs())}')
           .join(' · '));
     }
     return buffer.toString();
@@ -1192,8 +1205,8 @@ class AssistantEngine {
       final period =
           budget.period == BudgetPeriod.weekly ? 'this week' : 'this month';
       return status.isOver
-          ? '${budget.category}: ${formatMoney(status.spentPaise)} spent of ${formatMoney(status.limitPaise)} — ${formatMoney(-status.remainingPaise)} over $period.'
-          : '${budget.category}: ${formatMoney(status.remainingPaise)} remains of ${formatMoney(status.limitPaise)} $period (${status.utilizationPercent}% used).';
+          ? '${budget.category}: ${_money(status.spentPaise)} spent of ${_money(status.limitPaise)} — ${_money(-status.remainingPaise)} over $period.'
+          : '${budget.category}: ${_money(status.remainingPaise)} remains of ${_money(status.limitPaise)} $period (${status.utilizationPercent}% used).';
     });
     return lines.join('\n');
   }
@@ -1203,7 +1216,7 @@ class AssistantEngine {
     if (bills.isEmpty) return 'No bills are due in the next 30 days.';
     return 'Upcoming bills:\n${bills.map((bill) {
       final overdue = isBillOverdue(bill, now);
-      return '• ${bill.name}: ${formatMoney(bill.amountPaise)} ${overdue ? 'overdue since' : 'due'} ${friendlyDay(bill.nextDueAt, now).toLowerCase()}';
+      return '• ${bill.name}: ${_money(bill.amountPaise)} ${overdue ? 'overdue since' : 'due'} ${friendlyDay(bill.nextDueAt, now).toLowerCase()}';
     }).join('\n')}';
   }
 
@@ -1211,8 +1224,8 @@ class AssistantEngine {
     if (store.goals.isEmpty) return 'You have no savings goals yet.';
     return store.goals.map((goal) {
       final suggestion = suggestedMonthlyContribution(goal, now);
-      return '${goal.name}: ${formatMoney(goal.savedPaise)} of ${formatMoney(goal.targetPaise)} (${(goal.progress * 100).round()}%)'
-          '${suggestion == null ? '' : ' · about ${formatMoney(suggestion)}/month to reach it by ${formatDate(goal.targetDate!)}'}';
+      return '${goal.name}: ${_money(goal.savedPaise)} of ${_money(goal.targetPaise)} (${(goal.progress * 100).round()}%)'
+          '${suggestion == null ? '' : ' · about ${_money(suggestion)}/month to reach it by ${formatDate(goal.targetDate!)}'}';
     }).join('\n');
   }
 
@@ -1233,11 +1246,11 @@ class AssistantEngine {
       '• Focus: ${formatDuration(Duration(minutes: review.focusMinutes))} in ${review.focusSessions} completed sessions',
       if (review.habitRate != null)
         '• Habits: ${(review.habitRate! * 100).round()}% of check-ins done',
-      '• Spent ${formatMoney(review.summary.expenses)} (previous week ${formatMoney(review.previousExpenses)}); income ${formatMoney(review.summary.income)}',
+      '• Spent ${_money(review.summary.expenses)} (previous week ${_money(review.previousExpenses)}); income ${_money(review.summary.income)}',
       if (review.topCategories.isNotEmpty)
-        '• Top spending: ${review.topCategories.entries.map((item) => '${item.key} ${formatMoney(item.value)}').join(', ')}',
+        '• Top spending: ${review.topCategories.entries.map((item) => '${item.key} ${_money(item.value)}').join(', ')}',
       if (review.nextWeekBills.isNotEmpty)
-        '• Bills next week: ${review.nextWeekBills.map((bill) => '${bill.name} ${formatMoney(bill.amountPaise)}').join(', ')}',
+        '• Bills next week: ${review.nextWeekBills.map((bill) => '${bill.name} ${_money(bill.amountPaise)}').join(', ')}',
     ];
     return lines.join('\n');
   }

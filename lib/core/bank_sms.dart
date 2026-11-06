@@ -134,6 +134,48 @@ String redactSms(String body) => body
 
 enum SmsChannel { upi, card, atm, transfer }
 
+/// A balance or available credit limit written in a bank message.
+class SmsBalance {
+  const SmsBalance(this.paise, {this.isLimit = false});
+
+  /// Negative when the bank marks the balance as owed (`Dr`).
+  final int paise;
+
+  /// True for a card's available credit limit rather than money held.
+  final bool isLimit;
+}
+
+final _balancePattern = RegExp(
+  r'\b(?<!(?:minimum|min|average|avg|monthly|outstanding|loan|due|statement)\.?\s{0,2})'
+  r'(?:(?:avl|avbl|avail|available|updated|new|net|clear|closing|current)\.?\s*)?'
+  r'(?:a/?c\s*)?(bal(?:ance)?|lmt|limit)\b'
+  r'(?:\s+(?:in|of)\s+(?:your\s+)?(?:a/?c|acct|account)(?:\s*(?:no\.?)?\s*[x*]*\d{3,4})?)?'
+  r'(?:\s*is)?'
+  r'[\s.:\-]*(?:rs\.?|inr|₹)?[\s.:]*(-)?\s*(\d[\d,]*(?:\.\d{1,2})?)\s*(cr|dr)?\b',
+  caseSensitive: false,
+);
+
+/// The available balance (or card limit) a message reports, if any. When a
+/// message has both, the account balance wins over a credit limit.
+SmsBalance? smsBalance(String body) {
+  final text = body.replaceAll(RegExp(r'\s+'), ' ');
+  SmsBalance? limit;
+  for (final match in _balancePattern.allMatches(text)) {
+    final value = parseRupeesToPaise(match.group(3)!);
+    // A bare "0" can be a real balance; parseRupeesToPaise rejects it.
+    final paise = value ??
+        (RegExp(r'^0[0,]*(?:\.0{1,2})?$').hasMatch(match.group(3)!) ? 0 : null);
+    if (paise == null) continue;
+    final owed =
+        match.group(2) != null || (match.group(4)?.toLowerCase() == 'dr');
+    final isLimit = match.group(1)!.toLowerCase().startsWith('l');
+    final result = SmsBalance(owed ? -paise : paise, isLimit: isLimit);
+    if (!isLimit) return result;
+    limit ??= result;
+  }
+  return limit;
+}
+
 class ParsedSms {
   const ParsedSms({
     required this.kind,
@@ -144,6 +186,9 @@ class ParsedSms {
     this.date,
     this.channel = SmsChannel.transfer,
     this.isRefund = false,
+    this.balance,
+    this.isAutoPay = false,
+    this.isCardBillPayment = false,
   });
 
   final EntryKind kind;
@@ -163,6 +208,17 @@ class ParsedSms {
   final SmsChannel channel;
   final bool isRefund;
 
+  /// Balance or card limit left after this transaction, if the bank said.
+  final SmsBalance? balance;
+
+  /// Taken by a standing instruction: e-mandate, autopay, NACH, ECS or SI.
+  /// A strong sign that the payment repeats.
+  final bool isAutoPay;
+
+  /// "Payment received" on a credit card: money moving between the user's
+  /// own accounts, not income.
+  final bool isCardBillPayment;
+
   String get paymentMethod => switch (channel) {
         SmsChannel.upi => 'UPI',
         SmsChannel.card => 'Card',
@@ -172,22 +228,90 @@ class ParsedSms {
 }
 
 final _ignoreSms = RegExp(
-  r'\b(otp|one[- ]time password|verification code|will be debited|is due|due on|'
-  r'due date|requested|request of|collect request|failed|declined|unsuccessful|'
-  r'reminder|e-?mandate|autopay (is )?set|offer|cashback upto|pre-?approved|loan offer)\b',
+  r'\b(otp|one[- ]time password|verification code|will be (?:debited|deducted|charged)|'
+  r'to be debited|is due|due on|due date|requested|request of|collect request|'
+  r'your request|failed|declined|unsuccessful|reminder|offer|cashback upto|'
+  r'pre-?approved|loan offer)\b',
   caseSensitive: false,
 );
 
+/// Standing-instruction words. Set-up notices are ignored; executed debits
+/// are kept and marked as autopay.
+final _autoPay = RegExp(
+    r'\b(e-?mandate|auto-?pay|auto[- ]?debit|standing instruction|nach|ecs|si (?:executed|debit))\b',
+    caseSensitive: false);
+final _mandateSetup = RegExp(
+    r'\b(registered|registration|set up|setup|activated|created|is set|has been set|modified|revoked|cancelled|paused)\b',
+    caseSensitive: false);
+
 final _debit = RegExp(
-    r'\b(debited|spent|paid|sent|withdrawn|withdrawal|purchase|dr\b|deducted|transferred to)',
+    r'\b(debited|spent|paid|sent|withdrawn|withdrawal|purchase|dr\b|deducted|'
+    r'transferred to|trf to|debit of|has (?:a )?debit|charged)',
     caseSensitive: false);
 
 final _credit = RegExp(
-    r'\b(credited|received|deposited|refund(ed)?|revers(ed|al)|cr\b)',
+    r'\b(credited|received|deposited|refund(ed)?|revers(ed|al)|cr\b|'
+    r'credit of(?! card)|has (?:a )?credit\b(?! card))',
+    caseSensitive: false);
+
+/// "credited to VPA x@y" / "credited to beneficiary": the payee's side of a
+/// payment the user made. "credited to your a/c" / "to A/c XX1234" is not.
+final _creditedToPayee = RegExp(
+    r'\bcredited\s+to\s+(?!(?:your|ur|the|my|sb|savings?|current|salary|nre|nro|a/?c|acct|account|card|wallet)\b|[x*]+\d)\S',
+    caseSensitive: false);
+
+/// "...; SWIGGY credited." Names such as "Your a/c" or "Rs 500" are
+/// filtered out by [_notPayee].
+final _namedCredited = RegExp(
+    r'[;.]\s*([A-Za-z][A-Za-z0-9 &._@\-]{1,39}?)\s+credited\b',
+    caseSensitive: false);
+final _notPayee = RegExp(
+    r'^(?:your|ur|a/?c|acct|account|card|wallet|dear|hi|hello|salary|money|amount|refund)\b'
+    r'|\b(?:rs|inr)\b|₹'
+    // A masked account ("XXXXXX4321 is credited") or a passive verb.
+    r'|^[x*]+\d|\b(?:is|was|has been|have been|been|got)$',
+    caseSensitive: false);
+
+List<Match> _payeeCredits(String text) => [
+      ..._creditedToPayee.allMatches(text),
+      ..._namedCredited
+          .allMatches(text)
+          .where((match) => !_notPayee.hasMatch(match.group(1)!.trim())),
+    ];
+
+/// A credit card bill payment: "Payment of Rs 5,000 received on your
+/// credit card", or a bank debit "towards credit card payment". Not a card
+/// purchase paid "via credit card".
+final _cardBillPayment = RegExp(
+    r'\b(?:payment|repayment)\b.{0,60}?\b(?:towards|on|for|against)\s+(?:your\s+)?'
+    r'(?:(?!via\b|using\b|with\b|by\b|from\b)[a-z]+\s+){0,3}credit\s*card\b'
+    r'|\bcredit\s*card\s+(?:bill\s+)?(?:payment|repayment|bill)\b',
     caseSensitive: false);
 
 final _refund =
     RegExp(r'\b(refund(ed)?|revers(ed|al))\b', caseSensitive: false);
+
+/// Whether a message describes money coming in, going out, or neither.
+/// Balances are removed first so "Avl Bal Rs 900 CR" cannot make a debit
+/// look like a credit, and "credited" on the payee's side counts as a debit.
+EntryKind? smsDirection(String text) {
+  final plain = text.replaceAll(_balancePattern, ' ');
+  final payeeSide = _payeeCredits(plain);
+  bool isPayeeSide(Match match) => payeeSide
+      .any((side) => match.start >= side.start && match.start < side.end);
+  final debit = _debit.firstMatch(plain);
+  final credit = _credit
+      .allMatches(plain)
+      .where((match) => !isPayeeSide(match))
+      .firstOrNull;
+  if (debit == null && credit == null) {
+    // Only the payee was credited: the money left the user's account.
+    return payeeSide.isEmpty ? null : EntryKind.expense;
+  }
+  if (credit == null) return EntryKind.expense;
+  if (debit == null) return EntryKind.income;
+  return debit.start < credit.start ? EntryKind.expense : EntryKind.income;
+}
 
 final _amountTag =
     RegExp(r'(?:rs[.:]?|inr|₹)\s*([\d,]+(?:\.\d{1,2})?)', caseSensitive: false);
@@ -195,7 +319,7 @@ final _amountAfterVerb = RegExp(
     r'\b(?:debited|credited|withdrawn|deducted)\s+(?:by|with|for)\s+(?:rs[.:]?|inr|₹)?\s*([\d,]+(?:\.\d{1,2})?)',
     caseSensitive: false);
 final _balanceBefore = RegExp(
-    r'(?:bal|balance|limit|lmt|avl|avbl|available)[\s.:a-z]*$',
+    r'(?:bal|balance|limit|lmt|avl|avbl|available)[\s.:\-a-z]*$',
     caseSensitive: false);
 
 /// The transaction amount: the first rupee amount that is not a balance or
@@ -312,27 +436,33 @@ DateTime? _date(int year, int month, int day) {
   return date.month == month ? date : null;
 }
 
+/// Last digits of the account or card a message is about, e.g. "1234".
+String? smsAccountHint(String text) => RegExp(
+        r'(?:a/?c|acct|account|card)\s*(?:no\.?)?\s*(?:ending\s*(?:with)?\s*)?[x*]*(\d{3,4})\b',
+        caseSensitive: false)
+    .firstMatch(text)
+    ?.group(1);
+
 /// Reads a bank or UPI transaction SMS. Returns null for messages that are
 /// not completed transactions (OTPs, reminders, requests, offers, failures).
 /// [received] lets the date in the message be checked for plausibility.
 ParsedSms? parseBankSms(String body, {DateTime? received}) {
   final text = body.replaceAll(RegExp(r'\s+'), ' ').trim();
   if (_ignoreSms.hasMatch(text)) return null;
+  final autoPay = _autoPay.hasMatch(text);
+  // Mandate set-up, change or cancellation notices move no money.
+  if (autoPay &&
+      _mandateSetup.hasMatch(text) &&
+      !RegExp(r'\b(debited|deducted|charged|paid)\b', caseSensitive: false)
+          .hasMatch(text)) {
+    return null;
+  }
   final amount = _transactionAmount(text);
   if (amount == null || amount <= 0) return null;
-  final debit = _debit.firstMatch(text);
-  final credit = _credit.firstMatch(text);
-  if (debit == null && credit == null) return null;
-  // When both appear ("debited ... credited to X"), the first one wins.
-  final kind = credit == null || (debit != null && debit.start < credit.start)
-      ? EntryKind.expense
-      : EntryKind.income;
+  final kind = smsDirection(text);
+  if (kind == null) return null;
   final counterparty = _counterparty(text, kind);
-  final account = RegExp(
-          r'(?:a/?c|acct|account|card)\s*(?:no\.?)?\s*(?:ending\s*(?:with)?\s*)?[x*]*(\d{3,4})\b',
-          caseSensitive: false)
-      .firstMatch(text)
-      ?.group(1);
+  final account = smsAccountHint(text);
   final pathRef = RegExp(r'\bUPI/(?:P2[AM]/)?(\d{6,})/', caseSensitive: false)
       .firstMatch(text)
       ?.group(1);
@@ -360,6 +490,9 @@ ParsedSms? parseBankSms(String body, {DateTime? received}) {
     date: received == null ? null : smsDate(text, received),
     channel: channel,
     isRefund: kind == EntryKind.income && _refund.hasMatch(text),
+    balance: smsBalance(text),
+    isAutoPay: autoPay,
+    isCardBillPayment: _cardBillPayment.hasMatch(text),
   );
 }
 

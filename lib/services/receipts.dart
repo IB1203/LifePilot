@@ -6,7 +6,9 @@ import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../core/local_store.dart';
+import '../core/safe_paths.dart';
 import '../core/secure.dart';
+import 'receipt_ocr.dart';
 
 /// Encrypted receipts end with this, after the original extension.
 const _sealedSuffix = '.lps';
@@ -16,16 +18,18 @@ Future<Directory> _receiptFolder() async =>
 
 /// Takes or picks a receipt photo and copies it into the app's private
 /// storage, encrypted with the device key when [cipher] is given, so it
-/// stays available if the original is deleted. Returns the stored path, or
-/// null if the user cancelled.
-Future<String?> captureReceipt(
-    {required bool camera, DataCipher? cipher}) async {
+/// stays available if the original is deleted. With [readText], the text
+/// on the receipt is read on the phone (before the plain copy is removed).
+/// Returns the stored path and any text, or null if the user cancelled.
+Future<({String path, String? text})?> captureReceipt(
+    {required bool camera, DataCipher? cipher, bool readText = false}) async {
   final picked = await ImagePicker().pickImage(
     source: camera ? ImageSource.camera : ImageSource.gallery,
     maxWidth: 1600,
     imageQuality: 80,
   );
   if (picked == null) return null;
+  final text = readText ? await readReceiptText(picked.path) : null;
   final folder = await _receiptFolder();
   await folder.create(recursive: true);
   final extension =
@@ -47,12 +51,17 @@ Future<String?> captureReceipt(
   } on FileSystemException {
     // Not ours to delete on some devices (e.g. a gallery original).
   }
-  return stored;
+  return (path: stored, text: text);
 }
 
 /// Removes a stored receipt file. Missing files are ignored.
+/// Whether [path] is a receipt LifePilot stored itself. Paths from a
+/// restored backup are checked before any file is read or deleted.
+Future<bool> _isOwnReceipt(String path) async =>
+    isOwnFile(path, (await _receiptFolder()).path, receiptFileName);
+
 Future<void> deleteReceiptFile(String? path) async {
-  if (path == null) return;
+  if (path == null || !await _isOwnReceipt(path)) return;
   try {
     final file = File(path);
     if (await file.exists()) await file.delete();
@@ -62,6 +71,9 @@ Future<void> deleteReceiptFile(String? path) async {
 }
 
 Future<Uint8List> _readReceipt(String path, DataCipher? cipher) async {
+  if (!await _isOwnReceipt(path)) {
+    throw StateError('Not a receipt stored by LifePilot.');
+  }
   final bytes = await File(path).readAsBytes();
   if (!path.endsWith(_sealedSuffix)) return bytes;
   if (cipher == null) throw StateError('The device key is not available.');
@@ -115,6 +127,7 @@ Future<int> encryptPlainReceipts(LifePilotStore store) async {
   }.whereType<String>().where((path) => !path.endsWith(_sealedSuffix));
   var converted = 0;
   for (final path in paths) {
+    if (!await _isOwnReceipt(path)) continue;
     try {
       final source = File(path);
       if (!await source.exists()) continue;

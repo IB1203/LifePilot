@@ -10,6 +10,7 @@ import '../core/formatters.dart';
 import '../core/insights.dart';
 import '../core/local_store.dart';
 import '../core/models.dart';
+import '../core/money_glance.dart';
 import '../services/device_security.dart';
 import '../ui/charts.dart';
 import '../ui/forms.dart';
@@ -17,7 +18,11 @@ import '../ui/theme.dart';
 import '../ui/widgets.dart';
 import 'dashboard_page.dart' show EntryTile, InsightCard;
 import 'lock_screen.dart' show confirmIdentity;
+import 'debts_tab.dart';
+import 'investments_tab.dart';
 import 'money_extras.dart';
+import 'plan_tab.dart';
+import 'spending_habits_section.dart';
 import 'upi_page.dart';
 
 class FinancePage extends StatelessWidget {
@@ -27,7 +32,7 @@ class FinancePage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => DefaultTabController(
-        length: 9,
+        length: 12,
         child: Column(
           children: [
             Material(
@@ -40,8 +45,11 @@ class FinancePage extends StatelessWidget {
                   Tab(text: 'Activity'),
                   Tab(text: 'Budgets'),
                   Tab(text: 'Bills'),
+                  Tab(text: 'Plan'),
                   Tab(text: 'Recurring'),
                   Tab(text: 'Accounts'),
+                  Tab(text: 'Debts'),
+                  Tab(text: 'Investments'),
                   Tab(text: 'Goals'),
                   Tab(text: 'Reports'),
                   Tab(text: 'UPI'),
@@ -55,8 +63,11 @@ class FinancePage extends StatelessWidget {
                   _ActivityTab(store: store),
                   _BudgetsTab(store: store),
                   _BillsTab(store: store),
+                  PlanTab(store: store),
                   RecurringTab(store: store),
                   AccountsTab(store: store),
+                  DebtsTab(store: store),
+                  InvestmentsTab(store: store),
                   _GoalsTab(store: store),
                   _ReportsTab(store: store),
                   UpiTab(store: store),
@@ -96,12 +107,23 @@ class _OverviewTab extends StatelessWidget {
                 now.minute)));
     final thisToDate =
         sumEntries(store.entries, kind: EntryKind.expense, range: current);
+    final split = {
+      for (final category in categories.keys)
+        if (subcategoryTotals(store.entries, monthRange(now), category)
+            case final parts when parts.keys.any((key) => key != 'Other'))
+          category: parts,
+    };
+    final changes = compareWithLastMonth(store.entries, now)
+        .where((change) => change.changePaise != 0)
+        .take(3)
+        .toList();
     final insights = buildInsights(
       entries: store.entries,
       budgets: store.budgets,
       bills: store.bills,
       goals: store.goals,
       now: now,
+      rules: store.recurring,
     );
     return ListView(
       padding: pagePadding,
@@ -117,7 +139,7 @@ class _OverviewTab extends StatelessWidget {
                     '${store.pending.length} ${store.pending.length == 1 ? 'draft is' : 'drafts are'} waiting for review'),
                 subtitle: const Text('Recurring entries and SMS transactions'),
                 trailing: const Icon(Icons.chevron_right),
-                onTap: () => DefaultTabController.of(context).animateTo(4),
+                onTap: () => DefaultTabController.of(context).animateTo(5),
               ),
             ),
           ),
@@ -194,6 +216,33 @@ class _OverviewTab extends StatelessWidget {
                 : '${formatMoney(thisToDate)} by day ${now.day} vs ${formatMoney(lastToDate)} by day $sameDay of ${shortMonthLabel(previousMonth)}'),
           ),
         ),
+        if (changes.isNotEmpty) ...[
+          const SectionHeader(title: 'Biggest changes by category'),
+          CardList(
+            children: [
+              for (final change in changes)
+                ListTile(
+                  dense: true,
+                  leading: Icon(
+                    change.changePaise > 0
+                        ? Icons.arrow_upward
+                        : Icons.arrow_downward,
+                    color:
+                        change.changePaise > 0 ? colors.expense : colors.income,
+                  ),
+                  title: Text(change.category),
+                  subtitle: Text(
+                      '${formatMoney(change.thisMonthPaise)} vs ${formatMoney(change.lastMonthPaise)} by this point last month'),
+                  trailing: Text(
+                    change.changePercent == null
+                        ? 'new'
+                        : '${change.changePercent! > 0 ? '+' : ''}${change.changePercent}%',
+                    style: theme.textTheme.labelLarge,
+                  ),
+                ),
+            ],
+          ),
+        ],
         const SectionHeader(title: 'Top spending categories'),
         if (categories.isEmpty)
           EmptyState(
@@ -215,6 +264,21 @@ class _OverviewTab extends StatelessWidget {
               ),
             ),
           ),
+        if (split.isNotEmpty) ...[
+          const SectionHeader(title: 'By subcategory'),
+          CardList(
+            children: [
+              for (final MapEntry(key: category, value: parts) in split.entries)
+                ListTile(
+                  dense: true,
+                  title: Text(category),
+                  subtitle: Text(parts.entries
+                      .map((item) => '${item.key} ${formatMoney(item.value)}')
+                      .join(' · ')),
+                ),
+            ],
+          ),
+        ],
         if (insights.isNotEmpty) ...[
           const SectionHeader(title: 'Insights'),
           for (final insight in insights)
@@ -685,6 +749,7 @@ class _BudgetsTab extends StatelessWidget {
                 child: _BudgetCard(store: store, status: statuses[i]),
               ),
             ),
+        SpendingHabitsSection(store: store),
       ],
     );
   }
@@ -708,6 +773,7 @@ class _BudgetCard extends StatelessWidget {
             : null;
     final period =
         budget.period == BudgetPeriod.weekly ? 'this week' : 'this month';
+    final forecast = budgetForecast(budget, store.entries, store.now());
     return Card(
       child: InkWell(
         onTap: () => _history(context),
@@ -764,6 +830,14 @@ class _BudgetCard extends StatelessWidget {
                               '${status.carriedOverPaise > 0 ? ' · includes ${formatMoney(status.carriedOverPaise)} rolled over' : ''}',
                       style: theme.textTheme.bodySmall?.copyWith(color: color),
                     ),
+                    if (forecast != null && !status.isOver)
+                      Text(
+                        forecast.willExceed
+                            ? 'At this pace: about ${formatMoney(forecast.projectedPaise)} by month end, ${formatMoney(forecast.overPaise)} over'
+                            : 'At this pace: about ${formatMoney(forecast.projectedPaise)} by month end',
+                        style: theme.textTheme.bodySmall?.copyWith(
+                            color: forecast.willExceed ? colors.warning : null),
+                      ),
                   ],
                 ),
               ),

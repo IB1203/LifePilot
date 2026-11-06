@@ -1,3 +1,4 @@
+import 'cash_plan.dart' show priceIncreases;
 import 'finance_calc.dart';
 import 'formatters.dart';
 import 'models.dart';
@@ -31,9 +32,11 @@ List<Insight> buildInsights({
   required List<Bill> bills,
   required List<SavingsGoal> goals,
   required DateTime now,
+  List<RecurringEntry> rules = const [],
 }) {
   final insights = <Insight>[
     ..._billInsights(bills, now),
+    ..._priceInsights(bills, rules, entries, now),
     ..._budgetInsights(budgets, entries, now),
     ..._categoryTrendInsights(entries, now),
     ..._unusualTransactionInsights(entries, now),
@@ -41,6 +44,22 @@ List<Insight> buildInsights({
   ];
   insights.sort((a, b) => b.level.index.compareTo(a.level.index));
   return insights;
+}
+
+Iterable<Insight> _priceInsights(List<Bill> bills, List<RecurringEntry> rules,
+    List<LedgerEntry> entries, DateTime now) sync* {
+  for (final change in priceIncreases(
+      bills: bills, rules: rules, entries: entries, now: now)) {
+    yield Insight(
+      id: 'price-${change.name}',
+      title: '${change.name} went up ${change.percent}%',
+      detail:
+          'Now ${formatMoney(change.newPaise)}, was ${formatMoney(change.oldPaise)} '
+          '(${formatMoney(change.changePaise * 12)} more a year if monthly). Check it is still worth it.',
+      basis: 'Your last two payments for ${change.name}.',
+      level: InsightLevel.attention,
+    );
+  }
 }
 
 Iterable<Insight> _billInsights(List<Bill> bills, DateTime now) sync* {

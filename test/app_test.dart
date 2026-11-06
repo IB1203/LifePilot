@@ -184,6 +184,8 @@ void main() {
       'Reports',
       'UPI'
     ]) {
+      await tester.ensureVisible(find.widgetWithText(Tab, tab));
+      await tester.pumpAndSettle();
       await tester.tap(find.widgetWithText(Tab, tab));
       await tester.pumpAndSettle();
       expect(tester.takeException(), isNull, reason: '$tab tab');
@@ -260,12 +262,18 @@ void main() {
       'Activity',
       'Budgets',
       'Bills',
+      'Plan',
       'Recurring',
       'Accounts',
+      'Debts',
+      'Investments',
       'Goals',
       'Reports',
       'UPI'
     ]) {
+      // The tab bar scrolls; bring each tab on screen before tapping it.
+      await tester.ensureVisible(find.widgetWithText(Tab, tab));
+      await tester.pumpAndSettle();
       await tester.tap(find.widgetWithText(Tab, tab));
       await tester.pumpAndSettle();
       expect(tester.takeException(), isNull, reason: 'Finance $tab');
@@ -287,6 +295,18 @@ void main() {
     await tester.pageBack();
     await tester.pumpAndSettle();
 
+    for (final page in ['Documents and warranties', 'Tax and GST']) {
+      await tester.ensureVisible(find.text(page));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text(page));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull, reason: page);
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+    }
+
+    await tester.ensureVisible(find.text('Clock and world clock'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('Clock and world clock'));
     await tester.pumpAndSettle();
     for (final tab in [

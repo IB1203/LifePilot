@@ -12,6 +12,7 @@ import '../ui/forms.dart';
 import '../ui/theme.dart';
 import '../ui/widgets.dart';
 import 'habits_tab.dart';
+import 'money_glance_section.dart';
 import 'weekly_review_page.dart';
 
 class DashboardPage extends StatelessWidget {
@@ -86,6 +87,8 @@ class DashboardPage extends StatelessWidget {
   Widget _section(BuildContext context, String id, DateTime now,
           List<PlannedNotification> plan) =>
       switch (id) {
+        'glance' => MoneyGlanceSection(
+            store: store, now: now, onOpen: () => onNavigate(1)),
         'today' => _TodayOverview(
             store: store, now: now, plan: plan, onOpen: () => onNavigate(2)),
         'finance' =>
@@ -628,6 +631,7 @@ class _Insights extends StatelessWidget {
       bills: store.bills,
       goals: store.goals,
       now: now,
+      rules: store.recurring,
     ).take(3).toList();
     if (insights.isEmpty) return const SizedBox.shrink();
     return Column(
@@ -859,11 +863,8 @@ class _CustomizeSheet extends StatefulWidget {
 }
 
 class _CustomizeSheetState extends State<_CustomizeSheet> {
-  late final List<String> _order = [
-    ...widget.store.settings.dashboardOrder.where(dashboardSectionIds.contains),
-    ...dashboardSectionIds
-        .where((id) => !widget.store.settings.dashboardOrder.contains(id)),
-  ];
+  late final List<String> _order =
+      orderedSections(widget.store.settings.dashboardOrder);
   late final Set<String> _hidden = {...widget.store.settings.hiddenSections};
 
   @override

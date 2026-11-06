@@ -8,6 +8,7 @@ import '../core/formatters.dart';
 import '../core/local_store.dart';
 import '../core/models.dart';
 import '../core/personal.dart';
+import '../core/receipt_text.dart';
 import '../core/recurrence.dart';
 import '../services/receipts.dart';
 import '../services/reminder_coordinator.dart';
@@ -128,6 +129,49 @@ class _FormSheet extends StatelessWidget {
             ],
           ),
         ),
+      );
+}
+
+/// Free-text subcategory with suggestions from earlier entries in the same
+/// category.
+class _SubcategoryField extends StatelessWidget {
+  const _SubcategoryField({
+    required this.controller,
+    required this.options,
+    required this.category,
+  });
+
+  final TextEditingController controller;
+  final List<String> options;
+  final String category;
+
+  @override
+  Widget build(BuildContext context) => Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          TextFormField(
+            controller: controller,
+            textCapitalization: TextCapitalization.words,
+            decoration: InputDecoration(
+                labelText: 'Subcategory (optional)',
+                hintText: 'e.g. $category › Restaurants'),
+          ),
+          if (options.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Wrap(
+                spacing: 6,
+                runSpacing: 4,
+                children: [
+                  for (final option in options.take(6))
+                    ActionChip(
+                      label: Text(option),
+                      onPressed: () => controller.text = option,
+                    ),
+                ],
+              ),
+            ),
+        ],
       );
 }
 
@@ -269,6 +313,7 @@ class _EntryFormState extends State<_EntryForm> {
   final _amount = TextEditingController();
   final _title = TextEditingController();
   final _merchant = TextEditingController();
+  final _subcategory = TextEditingController();
   final _note = TextEditingController();
   late EntryKind _kind;
   late String _category;
@@ -295,13 +340,16 @@ class _EntryFormState extends State<_EntryForm> {
       _amount.text = paiseToInput(entry.amountPaise);
       _title.text = entry.title;
       _merchant.text = entry.merchant;
+      _subcategory.text = entry.subcategory;
       _note.text = entry.note;
       _category = entry.category;
       _paymentMethod = entry.paymentMethod;
       _accountId = widget.store.accountById(entry.accountId)?.id;
       _receiptPath = entry.receiptPath;
       _categoryChosen = true;
-      _showDetails = entry.merchant.isNotEmpty || entry.note.isNotEmpty;
+      _showDetails = entry.merchant.isNotEmpty ||
+          entry.note.isNotEmpty ||
+          entry.subcategory.isNotEmpty;
     } else {
       _category = _defaultCategory(_kind);
     }
@@ -319,6 +367,7 @@ class _EntryFormState extends State<_EntryForm> {
     _amount.dispose();
     _title.dispose();
     _merchant.dispose();
+    _subcategory.dispose();
     _note.dispose();
     super.dispose();
   }
@@ -345,15 +394,58 @@ class _EntryFormState extends State<_EntryForm> {
 
   Future<void> _attachReceipt(bool camera) async {
     try {
-      final path =
-          await captureReceipt(camera: camera, cipher: widget.store.dataCipher);
-      if (path == null || !mounted) return;
-      setState(() => _receiptPath = path);
+      final captured = await captureReceipt(
+          camera: camera,
+          cipher: widget.store.dataCipher,
+          readText: !isDesktop && !_editing);
+      if (captured == null || !mounted) return;
+      setState(() => _receiptPath = captured.path);
+      final text = captured.text;
+      if (text != null) _fillFromReceipt(text);
     } on Object catch (error) {
       if (mounted) {
         setState(() => _error = 'Could not attach the photo: $error');
       }
     }
+  }
+
+  /// Fills empty fields from the receipt's text and says what was read, so
+  /// the user can check it before saving.
+  void _fillFromReceipt(String text) {
+    final fields = parseReceiptText(text, now: widget.store.now());
+    if (fields.isEmpty) {
+      showMessage(context, 'Receipt attached. Could not read its total.');
+      return;
+    }
+    final filled = <String>[];
+    setState(() {
+      if (fields.totalPaise != null && _amount.text.trim().isEmpty) {
+        _amount.text = paiseToInput(fields.totalPaise!);
+        filled.add(formatMoney(fields.totalPaise!));
+      }
+      final merchant = fields.merchant;
+      if (merchant != null && _title.text.trim().isEmpty) {
+        _title.text = merchant;
+        _merchant.text = merchant;
+        filled.add(merchant);
+      }
+      final date = fields.date;
+      if (date != null) {
+        _occurredAt = DateTime(date.year, date.month, date.day,
+            _occurredAt.hour, _occurredAt.minute);
+        filled.add(formatDate(date));
+      }
+      if (fields.gstPaise != null && _note.text.trim().isEmpty) {
+        _note.text = 'Includes GST ${formatMoney(fields.gstPaise!)}';
+        _showDetails = true;
+      }
+    });
+    if (fields.merchant != null) _suggestFrom(fields.merchant!);
+    showMessage(
+        context,
+        filled.isEmpty
+            ? 'Receipt attached.'
+            : 'Read from receipt: ${filled.join(' · ')}. Check before saving.');
   }
 
   List<String> get _quickCategories {
@@ -531,7 +623,7 @@ class _EntryFormState extends State<_EntryForm> {
               if (!isDesktop)
                 ActionChip(
                   avatar: const Icon(Icons.photo_camera_outlined, size: 18),
-                  label: const Text('Photo receipt'),
+                  label: const Text('Scan receipt'),
                   onPressed: () => _attachReceipt(true),
                 ),
               ActionChip(
@@ -547,10 +639,18 @@ class _EntryFormState extends State<_EntryForm> {
             child: TextButton.icon(
               onPressed: () => setState(() => _showDetails = true),
               icon: const Icon(Icons.add),
-              label: Text(_isExpense ? 'Merchant and note' : 'Note'),
+              label: Text(_isExpense
+                  ? 'Subcategory, merchant and note'
+                  : 'Subcategory and note'),
             ),
           )
         else ...[
+          _SubcategoryField(
+            controller: _subcategory,
+            options: widget.store.subcategoriesOf(_category),
+            category: _category,
+          ),
+          _gap,
           if (_isExpense) ...[
             TextFormField(
               controller: _merchant,
@@ -603,6 +703,7 @@ class _EntryFormState extends State<_EntryForm> {
       occurredAt: _occurredAt,
       paymentMethod: _paymentMethod,
       merchant: _merchant.text.trim(),
+      subcategory: _subcategory.text.trim(),
       note: _note.text.trim(),
       accountId: _accountId,
       receiptPath: _receiptPath,
@@ -637,6 +738,7 @@ class _EntryFormState extends State<_EntryForm> {
           occurredAt: draft.occurredAt,
           paymentMethod: draft.paymentMethod,
           merchant: draft.merchant,
+          subcategory: draft.subcategory,
           note: draft.note,
           accountId: draft.accountId,
           clearAccount: draft.accountId == null,
@@ -660,6 +762,7 @@ class _EntryFormState extends State<_EntryForm> {
           occurredAt: draft.occurredAt,
           paymentMethod: draft.paymentMethod,
           merchant: draft.merchant,
+          subcategory: draft.subcategory,
           note: draft.note,
           accountId: draft.accountId,
           receiptPath: draft.receiptPath,

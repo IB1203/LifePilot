@@ -56,6 +56,7 @@ List<PlannedNotification> buildNotificationPlan({
   required ClockState clock,
   required DateTime now,
   List<Habit> habits = const [],
+  List<PlannedNotification> extra = const [],
   bool use24h = false,
   Duration horizon = const Duration(days: 30),
 }) {
@@ -214,6 +215,7 @@ List<PlannedNotification> buildNotificationPlan({
     }
   }
 
+  dated.addAll(extra.where((item) => item.at.isAfter(now)));
   dated.sort((a, b) => a.at.compareTo(b.at));
   final room = maxPlannedNotifications - fixed.length;
   final plan = <int, PlannedNotification>{};

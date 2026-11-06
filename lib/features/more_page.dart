@@ -16,6 +16,8 @@ import 'data_tools.dart';
 import 'lock_screen.dart';
 import 'onboarding_page.dart' show AccentPicker;
 import 'sms_settings_page.dart';
+import 'tax_page.dart';
+import 'vault_page.dart';
 import 'weekly_review_page.dart';
 
 class MorePage extends StatelessWidget {
@@ -77,6 +79,28 @@ class MorePage extends StatelessWidget {
                 context,
                 MaterialPageRoute<void>(
                     builder: (_) => CalculatorPage(store: store)),
+              ),
+            ),
+            ListTile(
+              leading: const Icon(Icons.folder_special_outlined),
+              title: const Text('Documents and warranties'),
+              subtitle: const Text(
+                  'Encrypted copies, with reminders before they run out'),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute<void>(builder: (_) => VaultPage(store: store)),
+              ),
+            ),
+            ListTile(
+              leading: const Icon(Icons.receipt_long_outlined),
+              title: const Text('Tax and GST'),
+              subtitle: const Text(
+                  'Income tax, old vs new regime, and a GST calculator'),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute<void>(builder: (_) => TaxPage(store: store)),
               ),
             ),
             ListTile(
@@ -839,6 +863,15 @@ class _SecuritySettings extends StatelessWidget {
                 weaker: !value,
                 reason: 'Confirm to stop asking before sensitive actions',
                 apply: (current) => current.copyWith(confirmSensitive: value)),
+          ),
+          SwitchListTile(
+            secondary: const Icon(Icons.visibility_off_outlined),
+            title: const Text('Hide amounts'),
+            subtitle: const Text(
+                'Show amounts as dots on screen, for using the app in public. Exports and the assistant still show them.'),
+            value: settings.hideAmounts,
+            onChanged: (value) =>
+                store.updateSettings(settings.copyWith(hideAmounts: value)),
           ),
           SwitchListTile(
             secondary: const Icon(Icons.screenshot_outlined),

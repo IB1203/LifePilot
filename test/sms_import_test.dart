@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lifepilot_ai/core/local_store.dart';
 import 'package:lifepilot_ai/core/models.dart';
+import 'package:lifepilot_ai/core/recurrence.dart';
 import 'package:lifepilot_ai/core/sms_import.dart';
 import 'package:lifepilot_ai/core/upi.dart';
 import 'package:lifepilot_ai/features/money_extras.dart';
@@ -113,6 +114,161 @@ void main() {
     ]);
     expect(trusted.drafts.single.warning, isEmpty);
     expect(trusted.drafts.single.sourceText, contains('Avl Bal'));
+  });
+
+  test('balances are read per account, newest wins', () async {
+    final import = buildSmsImport(store, [
+      _sms('JD-KOTAKB',
+          'Sent Rs.640.00 from Kotak Bank AC X1234 to zomato@hdfcbank on 30-10-26.UPI Ref 430900000001. Avl Bal Rs 9,000.00'),
+      // Balance-only message from a bank: no draft, balance still read.
+      _sms('VM-HDFCBK',
+          'Your A/c XX5678 balance is Rs 12,345.00 as on 30-10-26.'),
+    ]);
+    expect(import.drafts.single.balancePaise, 900000);
+    expect(import.balances, hasLength(2));
+    await store.applySmsImport(import);
+    final kotak =
+        store.bankBalances.firstWhere((item) => item.bank == 'Kotak Bank');
+    expect(kotak.accountHint, '1234');
+    expect(kotak.paise, 900000);
+    expect(store.pending.single.balancePaise, 900000);
+
+    // An older message does not overwrite a newer balance.
+    await store.applySmsImport(buildSmsImport(store, [
+      _sms('VM-HDFCBK', 'Your A/c XX5678 balance is Rs 1.00 as on 28-10-26.',
+          _now.subtract(const Duration(days: 2))),
+    ]));
+    expect(
+        store.bankBalances
+            .firstWhere((item) => item.bank == 'HDFC Bank')
+            .paise,
+        1234500);
+
+    // Survives backup and restore; can be forgotten.
+    final copy = LifePilotStore.inMemory(clock: () => _now);
+    await copy.restoreJson(store.exportJson());
+    expect(copy.bankBalances, hasLength(2));
+    await store.forgetBankBalances();
+    expect(store.bankBalances, isEmpty);
+  });
+
+  test('a salary SMS confirms the recurring draft instead of duplicating it',
+      () async {
+    await store.addRecurring(
+      kind: EntryKind.income,
+      amountPaise: 5000000,
+      category: 'Salary',
+      title: 'Salary',
+      recurrence: const Recurrence(Repeat.monthly),
+      firstDate: _now,
+    );
+    expect(store.pending.single.source, 'recurring');
+    final import = buildSmsImport(store, [
+      _sms('VM-HDFCBK',
+          'Your A/c XX1234 is credited with INR 50,500.00 on 30-10-2026 by NEFT from ACME TECHNOLOGIES PVT LTD. Avl Bal INR 1,23,456.00'),
+    ]);
+    expect(import.drafts, isEmpty);
+    expect(import.recurringMatches, hasLength(1));
+    await store.applySmsImport(import);
+    final draft = store.pending.single;
+    expect(draft.bankConfirmed, isTrue);
+    expect(draft.entry.title, 'Salary');
+    expect(draft.entry.amountPaise, 5050000, reason: 'the bank amount wins');
+    expect(draft.balancePaise, 12345600);
+    expect(draft.warning, contains('expects'));
+  });
+
+  test('a rent SMS that arrives early is labelled, not drafted twice',
+      () async {
+    var clock = _now;
+    final local = LifePilotStore.inMemory(clock: () => clock);
+    final rule = await local.addRecurring(
+      kind: EntryKind.expense,
+      amountPaise: 1500000,
+      category: 'Bills',
+      title: 'Rent',
+      recurrence: const Recurrence(Repeat.monthly),
+      firstDate: DateTime(2026, 11, 2),
+    );
+    await local.applySmsImport(buildSmsImport(local, [
+      _sms('VM-HDFCBK',
+          'Rs.15000.00 debited from A/c XX1234 to VPA landlord@okaxis on 30-10-26'),
+    ]));
+    expect(local.pending.single.source, 'sms');
+    clock = DateTime(2026, 11, 2, 10);
+    await local.prepareDueRecurring();
+    final draft = local.pending.single;
+    expect(draft.recurringId, rule.id);
+    expect(draft.entry.title, 'Rent');
+    expect(local.recurring.single.nextDate, DateTime(2026, 12, 2));
+  });
+
+  testWidgets('editing a paused recurring entry keeps it paused',
+      (tester) async {
+    tester.view.physicalSize = const Size(1080, 2340);
+    tester.view.devicePixelRatio = 2.75;
+    addTearDown(tester.view.reset);
+    final rule = await store.addRecurring(
+      kind: EntryKind.expense,
+      amountPaise: 64900,
+      category: 'Bills',
+      title: 'Netflix',
+      recurrence: const Recurrence(Repeat.monthly),
+      firstDate: DateTime(2026, 11, 5),
+    );
+    await store.updateRecurring(rule.copyWith(active: false));
+    await tester.pumpWidget(MaterialApp(
+        theme: buildTheme(Brightness.light),
+        home: Scaffold(body: RecurringTab(store: store))));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Recurring options'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Edit'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, 'Save'));
+    await tester.pumpAndSettle();
+    expect(store.recurring.single.active, isFalse);
+  });
+
+  testWidgets('balances, money flow and recurring suggestions are shown',
+      (tester) async {
+    tester.view.physicalSize = const Size(1080, 2340);
+    tester.view.devicePixelRatio = 2.75;
+    addTearDown(tester.view.reset);
+    for (final month in [7, 8, 9, 10]) {
+      await store.addEntry(
+          kind: EntryKind.expense,
+          amountPaise: 64900,
+          category: 'Entertainment',
+          title: 'Netflix',
+          merchant: 'NETFLIX',
+          occurredAt: DateTime(2026, month, 5, 8));
+    }
+    await store.applySmsImport(buildSmsImport(store, [
+      _sms('VM-HDFCBK',
+          'Your A/c XX5678 balance is Rs 12,345.00 as on 30-10-26.'),
+    ]));
+    // The app rebuilds from the store at the top; do the same here.
+    await tester.pumpWidget(ListenableBuilder(
+        listenable: store,
+        builder: (context, _) => MaterialApp(
+            theme: buildTheme(Brightness.light),
+            home: Scaffold(body: RecurringTab(store: store)))));
+    await tester.pumpAndSettle();
+    expect(find.text('Available balance'), findsOneWidget);
+    expect(find.text('HDFC Bank ••5678'), findsOneWidget);
+    expect(find.text('Last 30 days'), findsOneWidget);
+    final add = find.text('Add as recurring');
+    await tester.scrollUntilVisible(add, 200,
+        scrollable: find.byType(Scrollable).first);
+    await tester.pumpAndSettle();
+    await tester.tap(add);
+    await tester.pumpAndSettle();
+    final rule = store.recurring.single;
+    expect(rule.title, 'Netflix');
+    expect(rule.recurrence.repeat, Repeat.monthly);
+    expect(rule.nextDate, DateTime(2026, 11, 5));
+    expect(find.text('Add as recurring'), findsNothing);
   });
 
   test('forgetting SMS text keeps drafts and fingerprints', () async {

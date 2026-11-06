@@ -1,44 +1,30 @@
-# Release signing
+# Signing
 
-Android identifies an app by its package name and signing key. Updates must be
-signed with the same key, so create it once and keep it safe. If the key or its
-password is lost, users can only get updates by uninstalling, which deletes
-their on-device records.
+LifePilot does not use a separate release key. Release APKs are signed with
+the Android debug key of the computer that builds them
+(`%USERPROFILE%\.android\debug.keystore`), so there is nothing to create or
+keep secret.
 
-## Create the key (once)
+## What this means
 
-```powershell
-keytool -genkey -v -keystore $env:USERPROFILE\lifepilot-release.jks `
-  -keyalg RSA -keysize 4096 -validity 10000 -alias lifepilot
-```
+- Android only installs an update over an app signed with the same key. Keep
+  building releases on the same computer, or copy `debug.keystore` to a new
+  one; otherwise users must uninstall before installing.
+- Versions up to 1.0.2 were signed with a different key (`CN=LifePilot,
+  O=IB1203`). Moving from those to 1.1.0 needs a one-time reinstall:
+  make an encrypted backup (More › Encrypted backup), uninstall, install the
+  new APK, then restore the backup.
+- Google Play does not accept debug-signed apps. Publishing there would need
+  a proper upload key again.
 
-Choose a strong password and store it in a password manager. Keep a copy of
-the `.jks` file outside this computer, for example on an encrypted drive.
-
-## Point the build at it
-
-Create `android/key.properties` (ignored by git, never share it):
-
-```properties
-storePassword=<password>
-keyPassword=<password>
-keyAlias=lifepilot
-storeFile=C:/Users/<you>/lifepilot-release.jks
-```
-
-Then build:
+## Build
 
 ```powershell
 flutter build apk --release --obfuscate --split-debug-info=build/symbols
-# or, for Google Play:
-flutter build appbundle --release --obfuscate --split-debug-info=build/symbols
+flutter build apk --release --split-per-abi --obfuscate --split-debug-info=build/symbols
 ```
 
-Keep the `build/symbols` folder for each released version so crash stack
-traces can be decoded with `flutter symbolize`.
-
-## Switching from a debug-signed install
-
-An APK signed with the release key cannot update one signed with the debug
-key. Before switching, make an encrypted backup (More › Encrypted backup),
-uninstall, install the release build and restore the backup.
+Attach `build/app/outputs/flutter-apk/app-release.apk` (as `LifePilot.apk`)
+and `app-arm64-v8a-release.apk` (as `LifePilot-arm64.apk`) to the GitHub
+release. Keep `build/symbols` for each version to decode crash stack traces
+with `flutter symbolize`.

@@ -41,7 +41,7 @@ class SmsSettingsPage extends StatelessWidget {
                     secondary: const Icon(Icons.notes_outlined),
                     title: const Text('Keep full message text'),
                     subtitle: const Text(
-                        'Off: drafts keep the message without balances and links.'),
+                        'Off: drafts keep the message without balances and links. Only the latest balance per account is kept, under Finance › Recurring.'),
                     value: settings.keepSmsText,
                     onChanged: (value) => store
                         .updateSettings(settings.copyWith(keepSmsText: value)),

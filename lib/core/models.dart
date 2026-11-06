@@ -30,6 +30,7 @@ class LedgerEntry {
     this.note = '',
     this.paymentMethod = 'Other',
     this.merchant = '',
+    this.subcategory = '',
     this.billId,
     this.accountId,
     this.receiptPath,
@@ -45,6 +46,9 @@ class LedgerEntry {
   final String note;
   final String paymentMethod;
   final String merchant;
+
+  /// Optional finer label within the category, e.g. Food › Restaurants.
+  final String subcategory;
 
   /// Set when the entry was recorded as the payment of a bill.
   final String? billId;
@@ -70,6 +74,7 @@ class LedgerEntry {
     String? note,
     String? paymentMethod,
     String? merchant,
+    String? subcategory,
     String? accountId,
     bool clearAccount = false,
     String? receiptPath,
@@ -85,6 +90,7 @@ class LedgerEntry {
         note: note ?? this.note,
         paymentMethod: paymentMethod ?? this.paymentMethod,
         merchant: merchant ?? this.merchant,
+        subcategory: subcategory ?? this.subcategory,
         billId: billId,
         accountId: clearAccount ? null : accountId ?? this.accountId,
         receiptPath: clearReceipt ? null : receiptPath ?? this.receiptPath,
@@ -101,6 +107,7 @@ class LedgerEntry {
         'note': note,
         'paymentMethod': paymentMethod,
         'merchant': merchant,
+        if (subcategory.isNotEmpty) 'subcategory': subcategory,
         if (billId != null) 'billId': billId,
         if (accountId != null) 'accountId': accountId,
         if (receiptPath != null) 'receiptPath': receiptPath,
@@ -124,6 +131,7 @@ class LedgerEntry {
       note: json['note'] as String? ?? '',
       paymentMethod: json['paymentMethod'] as String? ?? 'Other',
       merchant: json['merchant'] as String? ?? '',
+      subcategory: json['subcategory'] as String? ?? '',
       billId: json['billId'] as String?,
       accountId: json['accountId'] as String?,
       receiptPath: json['receiptPath'] as String?,
@@ -1022,7 +1030,22 @@ class ReminderLogEntry {
       );
 }
 
+/// The saved order with unknown ids dropped and sections added in later
+/// versions slotted in at their default position, so existing users see a
+/// new section where it belongs rather than at the very bottom.
+List<String> orderedSections(List<String> saved) {
+  final order = saved.where(dashboardSectionIds.contains).toList();
+  for (var i = 0; i < dashboardSectionIds.length; i++) {
+    final id = dashboardSectionIds[i];
+    if (!order.contains(id)) {
+      order.insert(i > order.length ? order.length : i, id);
+    }
+  }
+  return order;
+}
+
 const dashboardSectionIds = [
+  'glance',
   'today',
   'finance',
   'planner',
@@ -1035,6 +1058,7 @@ const dashboardSectionIds = [
 ];
 
 String dashboardSectionLabel(String id) => switch (id) {
+      'glance' => 'Your money at a glance',
       'today' => "Today's overview",
       'finance' => 'Finance overview',
       'planner' => 'Daily planner',
@@ -1093,6 +1117,7 @@ class AppSettings {
     this.smsCapture = false,
     this.keepSmsText = false,
     this.extraSmsSenders = const [],
+    this.hideAmounts = false,
   });
 
   final bool use24HourClock;
@@ -1146,15 +1171,17 @@ class AppSettings {
   /// Sender IDs the user marked as their bank's, e.g. a cooperative bank.
   final List<String> extraSmsSenders;
 
+  /// Show amounts as dots on screen, for use in public.
+  final bool hideAmounts;
+
   /// Whether the window should be hidden from screenshots and recent apps.
   bool get secureScreen => lockEnabled && !allowScreenshots;
 
   /// Visible dashboard sections in display order, including any sections
   /// added in later versions that an older saved order does not mention.
-  List<String> get visibleSections => [
-        ...dashboardOrder.where(dashboardSectionIds.contains),
-        ...dashboardSectionIds.where((id) => !dashboardOrder.contains(id)),
-      ].where((id) => !hiddenSections.contains(id)).toList();
+  List<String> get visibleSections => orderedSections(dashboardOrder)
+      .where((id) => !hiddenSections.contains(id))
+      .toList();
 
   AppSettings copyWith({
     bool? use24HourClock,
@@ -1187,6 +1214,7 @@ class AppSettings {
     bool? smsCapture,
     bool? keepSmsText,
     List<String>? extraSmsSenders,
+    bool? hideAmounts,
   }) =>
       AppSettings(
         use24HourClock: use24HourClock ?? this.use24HourClock,
@@ -1219,6 +1247,7 @@ class AppSettings {
         smsCapture: smsCapture ?? this.smsCapture,
         keepSmsText: keepSmsText ?? this.keepSmsText,
         extraSmsSenders: extraSmsSenders ?? this.extraSmsSenders,
+        hideAmounts: hideAmounts ?? this.hideAmounts,
       );
 
   Map<String, Object?> toJson() => {
@@ -1250,6 +1279,7 @@ class AppSettings {
         'smsCapture': smsCapture,
         'keepSmsText': keepSmsText,
         'extraSmsSenders': extraSmsSenders,
+        'hideAmounts': hideAmounts,
       };
 
   factory AppSettings.fromJson(Object? source) {
@@ -1303,6 +1333,7 @@ class AppSettings {
       smsCapture: source['smsCapture'] as bool? ?? false,
       keepSmsText: source['keepSmsText'] as bool? ?? false,
       extraSmsSenders: strings(source['extraSmsSenders'], const []),
+      hideAmounts: source['hideAmounts'] as bool? ?? false,
     );
   }
 }
@@ -1520,12 +1551,20 @@ class PendingEntry {
     this.recurringId,
     this.bankConfirmed = false,
     this.warning = '',
+    this.balancePaise,
+    this.autoPay = false,
   });
 
   final String id;
 
   /// Proposed values; its id is empty until approved.
   final LedgerEntry entry;
+
+  /// Available balance the bank reported right after this transaction.
+  final int? balancePaise;
+
+  /// Taken by an e-mandate, autopay, NACH or standing instruction.
+  final bool autoPay;
 
   /// `recurring` or `sms`.
   final String source;
@@ -1547,20 +1586,26 @@ class PendingEntry {
   final String warning;
 
   PendingEntry copyWith({
+    LedgerEntry? entry,
     String? sourceText,
+    String? recurringId,
     bool? bankConfirmed,
     String? warning,
+    int? balancePaise,
+    bool? autoPay,
   }) =>
       PendingEntry(
         id: id,
-        entry: entry,
+        entry: entry ?? this.entry,
         source: source,
         createdAt: createdAt,
         sourceKey: sourceKey,
         sourceText: sourceText ?? this.sourceText,
-        recurringId: recurringId,
+        recurringId: recurringId ?? this.recurringId,
         bankConfirmed: bankConfirmed ?? this.bankConfirmed,
         warning: warning ?? this.warning,
+        balancePaise: balancePaise ?? this.balancePaise,
+        autoPay: autoPay ?? this.autoPay,
       );
 
   Map<String, Object?> toJson() => {
@@ -1573,6 +1618,8 @@ class PendingEntry {
         'recurringId': recurringId,
         if (bankConfirmed) 'bankConfirmed': true,
         if (warning.isNotEmpty) 'warning': warning,
+        if (balancePaise != null) 'balancePaise': balancePaise,
+        if (autoPay) 'autoPay': true,
       };
 
   factory PendingEntry.fromJson(Map<String, dynamic> json) => PendingEntry(
@@ -1586,6 +1633,54 @@ class PendingEntry {
         recurringId: json['recurringId'] as String?,
         bankConfirmed: json['bankConfirmed'] as bool? ?? false,
         warning: json['warning'] as String? ?? '',
+        balancePaise: json['balancePaise'] as int?,
+        autoPay: json['autoPay'] as bool? ?? false,
+      );
+}
+
+/// The latest available balance (or card limit) a bank SMS reported for
+/// one account. Only the number is kept, never the message.
+class BankBalance {
+  const BankBalance({
+    required this.bank,
+    required this.paise,
+    required this.at,
+    this.accountHint,
+    this.isLimit = false,
+  });
+
+  final String bank;
+
+  /// Last digits of the account or card, if the message gave them.
+  final String? accountHint;
+
+  /// Negative when the bank marked it as owed.
+  final int paise;
+
+  /// A card's available credit limit rather than money held.
+  final bool isLimit;
+
+  /// When the message arrived.
+  final DateTime at;
+
+  String get key => '${bank.toLowerCase()}|${accountHint ?? ''}';
+
+  String get label => accountHint == null ? bank : '$bank ••$accountHint';
+
+  Map<String, Object?> toJson() => {
+        'bank': bank,
+        if (accountHint != null) 'accountHint': accountHint,
+        'paise': paise,
+        if (isLimit) 'isLimit': true,
+        'at': at.toIso8601String(),
+      };
+
+  factory BankBalance.fromJson(Map<String, dynamic> json) => BankBalance(
+        bank: json['bank'] as String,
+        accountHint: json['accountHint'] as String?,
+        paise: json['paise'] as int,
+        isLimit: json['isLimit'] as bool? ?? false,
+        at: DateTime.parse(json['at'] as String),
       );
 }
 

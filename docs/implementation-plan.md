@@ -44,12 +44,12 @@ Status as of 29 October 2026. "Tested" means covered by automated tests in
 
 1. Run on physical Android devices (Android 13+ and an older version) to verify notification delivery, exact-alarm behaviour, notification actions, reboot restore, and battery-optimisation effects on common OEM skins.
 2. Verify on device: SMS inbox import, receipt camera, voice input, biometrics and the home-screen widget.
-3. Bank statement import formats beyond the app's own CSV; optional reviewed notification-based transaction capture.
+3. Optional reviewed notification-based transaction capture. (Bank statement import — CSV/Excel — was delivered in Phase 8; text PDF statements are still not read.)
 4. Optional automatic posting of recurring entries (currently always drafts that need approval, by design).
 5. Cloud sync between devices (backups are manual files today).
 6. A true alarm-clock experience (full-screen, continuous ringing) would need native Android work; current alarms are high-priority notifications.
 7. Hindi (and other) translations: needs string extraction for ~700 UI strings and review by a native speaker.
-8. Create the release keystore (see docs/release-signing.md) before publishing.
+8. Releases are signed with the build computer's debug key by choice (no release key; see docs/release-signing.md). Google Play would need an upload key.
 9. Profile startup time, frame times and memory on a mid-range device.
 
 ## Phase 2: safer UPI payments (delivered)
@@ -82,6 +82,55 @@ Known limits: some UPI apps (notably Google Pay) decline or limit person-to-pers
 | Real-time capture | Implemented; settings flow and receiver on/off verified on device; capture of a real incoming SMS not verified | Opt-in. The receiver component is disabled unless on; it keeps only bank-like messages, sealed with the device key, posts a notification (amounts hidden while the app lock is on) and LifePilot imports them on open |
 | Play Store build | Not done (deliberately) | Google Play rejects SMS permissions for most finance apps. Publishing there needs a build without SMS permissions (paste-only), optionally with a notification-listener source; not needed while the app is sideloaded |
 
-## Next (not started)
+## Recurring entries and bank SMS fixes (delivered 6 November 2026)
 
-To be agreed with the user. Candidates from the roadmap: Phase 4 (statement import; Account Aggregator would need a regulated partner and a server) and Phase 5 (security tests, threat model, external review).
+Implemented and tested (`test/bank_sms_test.dart`, `test/sms_import_test.dart`, `test/recurring_detect_test.dart`); full suite 177 passing, analyzer clean. Not yet verified on a device.
+
+- Available balance and card limit read from bank SMS (including balance-only messages), shown per account next to LifePilot's recorded balance.
+- Smarter credited/debited detection: balances stripped before deciding, "credited to VPA/payee" counts as a debit, "has credit of"/"debit of" phrasing, executed e-mandate/autopay debits kept (set-up notices ignored), credit card bill payments flagged as transfers.
+- A bank SMS confirms the matching recurring draft (salary, rent, SIP) instead of creating a second draft; an SMS that arrives before the due date is labelled with the rule.
+- "Looks recurring" suggestions from history (weekly, monthly, quarterly, yearly), with add or "not recurring".
+- Last-30-days credited/debited totals; monthly in/out of recurring entries; editing a paused rule no longer resumes it; the recurring form no longer uses its text fields after they are disposed (crashed in debug while the sheet closed).
+- Fixed while testing: "Your a/c no. XXXXXX4321 is credited" was read as a payee being credited.
+
+## Phases 4–11 (from the November 2026 feature research)
+
+All delivered on 6 November 2026 in order, each finished before the next: analyzer clean, 270 automated tests passing (`flutter test`), debug APK builds. None of it is verified on a physical device yet; see the device checklist below.
+
+Every phase stays within the product invariants: offline, no paid API, no cloud account, and figures come only from the user's records. Each phase is finished and tested before the next one starts.
+
+| Phase | Theme | Contents | Size |
+|---|---|---|---|
+| 4 ✅ delivered 6 Nov 2026 | Money at a glance | "Your money at a glance" dashboard card (available, spent, saved, upcoming commitments); hide-amounts privacy toggle; net worth (accounts + goals − debts); predictive budgeting (month-end projection at the current pace) and a daily safe-to-spend amount; budget comparison between months; rule-based financial health score with each factor explained | M |
+| 5 ✅ delivered 6 Nov 2026 | Bills, subscriptions and cash flow | Financial calendar (bills, recurring entries, salary, SIPs, goals); monthly subscription report; price-increase alerts when a recurring payment's amount changes; 30/60-day cash-flow forecast with a shortfall warning; salary allocation plan (suggestions only, never transfers) | M |
+| 6 ✅ delivered 6 Nov 2026 | Debts and loans | Loans with EMI amortisation (outstanding principal, interest paid, closure date); credit card dues; money lent/borrowed with simple splitting and settle-up; debt-free planner comparing snowball and avalanche (total interest, months); debt-to-income ratio | L |
+| 7 ✅ delivered 6 Nov 2026 | Investments (manual values) | FD, RD, PPF, EPF, NPS, gold, mutual funds, stocks; maturity calculations and reminders; SIP calendar; profit/loss and XIRR on the user's transactions; allocation chart. Always labelled as values the user entered, never live prices | L |
+| 8 ✅ delivered 6 Nov 2026 | Import and capture | Bank statement import (CSV/Excel templates for major banks; text-based PDF where feasible); receipt OCR with on-device ML Kit (merchant, total, date) into a reviewable draft | L |
+| 9 ✅ delivered 6 Nov 2026 | Assistant upgrades | "Can I afford ₹X?", "Where can I cut back?", unusual-transaction detection, forecast and debt questions; every answer shows its calculation and basis | M |
+| 10 ✅ delivered 6 Nov 2026 | Extras | Subcategories; income tax estimate (old vs new regime) and GST calculator, driven by updatable rules (see below); encrypted document vault; no-spend challenge; spending heatmap; warranty tracker; trip budget | M each |
+| 11 ✅ delivered 6 Nov 2026 (self-review) | Assurance | Threat model (`docs/threat-model.md`), security tests for crafted backups (`test/security_extras_test.dart`); fixed: receipt and document paths from a backup could point at other app files, and shared document names could escape their folder. An external review is still recommended before any public release | M |
+
+### Tax and GST rules (Phase 10 design, requested 6 November 2026)
+
+- The financial year containing today is selected by default (April–March; FY 2026-27 as of November 2026). Earlier years remain selectable.
+- Rules are data, not code: one versioned JSON rules file per financial year, built into the app as data (`lib/core/tax_rules.dart`), with `schemaVersion`, `financialYear`, `source` (official URL) and `lastVerified` date. It covers new- and old-regime slabs, the rebate (87A), standard deduction, surcharge, cess, common deduction limits, and GST rate slabs.
+- Updating when rules change, all offline: (1) import a rules JSON file, which is schema-validated, shown as a before/after diff and applied only after confirmation; (2) edit the values in-app; (3) "Reset to built-in rules". User rules are stored with the user's data and included in backups.
+- GST calculator: add or remove GST at a chosen rate, with a CGST + SGST (intra-state) or IGST (inter-state) split; rates come from the same rules file.
+- Bundled values are verified against incometaxindia.gov.in and cbic-gst.gov.in at implementation time, never from memory. Results are labelled as estimates, not tax advice.
+
+### Device checklist for Phases 4–11
+
+- Bank SMS on a real inbox: balances, credited/debited, salary/rent matched to recurring drafts.
+- Statement import with a real CSV/Excel export from each bank used.
+- Receipt OCR (Scan receipt) on printed bills; ML Kit adds a few MB to the APK.
+- Maturity, warranty and policy reminders fire on time.
+- Documents: add a photo and a PDF, view, share, delete.
+- Tax: compare a known salary slip's tax with the estimate.
+
+Not planned, because it conflicts with the invariants or needs regulation or a server:
+
+- Account Aggregator integration: needs a regulated partner (FIU registration) and a server. Statement import (Phase 8) covers the need offline.
+- Family groups, invites, shared budgets and role-based access: need accounts and a sync server. Phase 6 splitting/settle-up covers the personal side.
+- Live market valuations: need a data feed. An optional public NAV download (AMFI) could be considered later as an explicit opt-in.
+- Cloud backup, active-session management and login alerts: there are no user accounts. Encrypted backup files already cover backup.
+- LLM chat assistant: the assistant stays local and rule-based with typed tools.

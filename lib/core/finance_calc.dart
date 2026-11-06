@@ -88,6 +88,26 @@ Map<String, int> categoryTotals(
   return Map.fromEntries(sorted);
 }
 
+/// Spending within [category] by subcategory, largest first; entries
+/// without a subcategory are grouped under "Other".
+Map<String, int> subcategoryTotals(
+    Iterable<LedgerEntry> entries, DateRange range, String category) {
+  final totals = <String, int>{};
+  for (final entry in entries) {
+    if (entry.kind != EntryKind.expense ||
+        entry.category != category ||
+        !range.contains(entry.occurredAt)) {
+      continue;
+    }
+    final key = entry.subcategory.isEmpty ? 'Other' : entry.subcategory;
+    totals.update(key, (value) => value + entry.amountPaise,
+        ifAbsent: () => entry.amountPaise);
+  }
+  final sorted = totals.entries.toList()
+    ..sort((a, b) => b.value.compareTo(a.value));
+  return Map.fromEntries(sorted);
+}
+
 /// Expense total for each day in [range], in order.
 List<({DateTime day, int amount})> dailyExpenses(
   Iterable<LedgerEntry> entries,

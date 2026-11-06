@@ -2,7 +2,13 @@
 /// units (paise for INR); only the presentation is configurable.
 class MoneyFormat {
   static String symbol = '₹';
+
+  /// "Hide amounts": on-screen amounts show as dots. Files and exports pass
+  /// `reveal: true`.
+  static bool hidden = false;
 }
+
+const _hiddenAmount = '••••';
 
 const _monthsShort = [
   'Jan',
@@ -44,7 +50,10 @@ const _weekdaysLong = [
   'Sunday',
 ];
 
-String formatMoney(int paise) {
+String formatMoney(int paise, {bool reveal = false}) {
+  if (MoneyFormat.hidden && !reveal) {
+    return '${MoneyFormat.symbol}$_hiddenAmount';
+  }
   final negative = paise < 0;
   final absolute = paise.abs();
   final rupees = absolute ~/ 100;
@@ -65,6 +74,7 @@ String formatMoney(int paise) {
 
 /// Whole-unit amount for compact labels such as chart axes, e.g. ₹3.2K.
 String formatMoneyCompact(int paise) {
+  if (MoneyFormat.hidden) return '${MoneyFormat.symbol}$_hiddenAmount';
   final rupees = paise.abs() / 100;
   final sign = paise < 0 ? '-' : '';
   final symbol = MoneyFormat.symbol;
