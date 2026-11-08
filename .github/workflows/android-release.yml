@@ -1,0 +1,50 @@
+# Builds an Android APK when a release is published and attaches it to the
+# release. Run manually with `workflow_dispatch` to rebuild an older tag.
+name: Android release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to attach the APK to (e.g. v1.0.4)
+        required: true
+      ref:
+        description: Branch or commit to build (defaults to the tag)
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.event.release.tag_name || inputs.tag }}
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.47.8
+          cache: true
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Build release APK
+        run: flutter build apk --release
+
+      - name: Show build artifacts and hashes
+        run: |
+          ls -lh build/app/outputs/flutter-apk/
+          for f in build/app/outputs/flutter-apk/*.apk; do
+            echo "$(basename "$f")  $(sha256sum "$f" | cut -d' ' -f1)"
+          done
+
+      - name: Attach APK to release
+        run: gh release upload "$env:TAG" build/app/outputs/flutter-apk/app-release.apk --clobber
