@@ -167,6 +167,15 @@ class ReminderCoordinator with WidgetsBindingObserver {
       case 'habit':
         navigation.value = 'tasks';
       case 'bill':
+        final id = parts.sublist(1).join(':');
+        if (actionId == 'mark_paid') {
+          final bill = store.billById(id);
+          if (bill != null) {
+            unawaited(
+                store.markBillPaid(id, amountPaise: bill.amountPaise));
+            messages.value = '${bill.name} marked paid.';
+          }
+        }
         navigation.value = 'finance';
       default:
         navigation.value = 'clock';

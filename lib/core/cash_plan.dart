@@ -205,14 +205,17 @@ bool _looksLikeSubscription(String title, String category) {
 }
 
 class Subscription {
-  const Subscription(this.name, this.amountPaise, this.repeat, this.nextDate);
+  const Subscription(this.name, this.amountPaise, this.repeat, this.nextDate,
+      {this.interval = 1});
 
   final String name;
   final int amountPaise;
   final Repeat repeat;
   final DateTime nextDate;
+  final int interval;
 
-  int get monthlyPaise => monthlyEquivalent(amountPaise, repeat);
+  int get monthlyPaise =>
+      monthlyEquivalent(amountPaise, repeat, interval: interval);
   int get yearlyPaise => monthlyPaise * 12;
 }
 
@@ -226,13 +229,15 @@ List<Subscription> subscriptions(
         (bill.kind == BillKind.subscription ||
             _looksLikeSubscription(bill.name, bill.category))))
       Subscription(
-          bill.name, bill.amountPaise, bill.recurrence.repeat, bill.nextDueAt),
+          bill.name, bill.amountPaise, bill.recurrence.repeat, bill.nextDueAt,
+          interval: bill.recurrence.interval),
     for (final rule in rules.where((rule) =>
         rule.active &&
         rule.kind == EntryKind.expense &&
         _looksLikeSubscription(rule.title, rule.category)))
       Subscription(
-          rule.title, rule.amountPaise, rule.recurrence.repeat, rule.nextDate),
+          rule.title, rule.amountPaise, rule.recurrence.repeat, rule.nextDate,
+          interval: rule.recurrence.interval),
   ]..sort((a, b) => b.monthlyPaise.compareTo(a.monthlyPaise));
   return items;
 }
@@ -246,7 +251,7 @@ class PriceChange {
   final DateTime on;
 
   int get changePaise => newPaise - oldPaise;
-  int get percent => (changePaise * 100 / oldPaise).round();
+  int get percent => oldPaise <= 0 ? 0 : (changePaise * 100 / oldPaise).round();
 }
 
 /// Regular payments whose latest amount went up compared with the one
@@ -268,6 +273,7 @@ List<PriceChange> priceIncreases({
     final previous = history[history.length - 2];
     // Ignore rounding-level changes (under 1% and ₹1).
     if (latest.at.isAfter(since) &&
+        previous.paise > 0 &&
         latest.paise > previous.paise &&
         (latest.paise - previous.paise) * 100 >= previous.paise &&
         latest.paise - previous.paise >= 100) {
@@ -281,7 +287,11 @@ List<PriceChange> priceIncreases({
         (paise: payment.amountPaise, at: payment.paidAt),
     ]);
   }
+  final seenRules = <String>{};
   for (final rule in rules) {
+    // Two rules with the same title and kind would see the same history and
+    // report the same change twice.
+    if (!seenRules.add('${rule.kind.name}\u0000${rule.title}')) continue;
     check(rule.title, [
       for (final entry in entries)
         if (entry.source == 'recurring' &&
@@ -343,8 +353,9 @@ SalaryPlan? salaryPlan({
       .toList();
   final ruleIncome = incomeRules.fold(
       0,
-      (sum, rule) =>
-          sum + monthlyEquivalent(rule.amountPaise, rule.recurrence.repeat));
+      (sum, rule) => sum +
+          monthlyEquivalent(rule.amountPaise, rule.recurrence.repeat,
+              interval: rule.recurrence.interval));
   final int income;
   final String incomeBasis;
   if (ruleIncome > 0) {
@@ -361,16 +372,16 @@ SalaryPlan? salaryPlan({
   final lines = <PlanLine>[];
   final int commitments = bills.where((bill) => bill.active).fold<int>(
           0,
-          (sum, bill) =>
-              sum +
-              monthlyEquivalent(bill.amountPaise, bill.recurrence.repeat)) +
+          (sum, bill) => sum +
+              monthlyEquivalent(bill.amountPaise, bill.recurrence.repeat,
+                  interval: bill.recurrence.interval)) +
       rules
           .where((rule) => rule.active && rule.kind == EntryKind.expense)
           .fold<int>(
               0,
-              (sum, rule) =>
-                  sum +
-                  monthlyEquivalent(rule.amountPaise, rule.recurrence.repeat));
+              (sum, rule) => sum +
+                  monthlyEquivalent(rule.amountPaise, rule.recurrence.repeat,
+                      interval: rule.recurrence.interval));
   if (commitments > 0) {
     lines.add(PlanLine('Bills and recurring payments', commitments,
         'Monthly equivalent of active bills and recurring expenses'));

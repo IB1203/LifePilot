@@ -22,7 +22,7 @@ class DebtsTab extends StatelessWidget {
     final mine = open.where((debt) => !debt.owedToMe).toList();
     final lent = open.where((debt) => debt.owedToMe).toList();
     final closed = store.debts.where((debt) => debt.closed).length;
-    final totals = debtTotals(store.debts);
+    final totals = debtTotals(store.debts, asOf: now);
     final income = summarize(
                 store.entries,
                 DateRange(DateTime(now.year, now.month - 3),
@@ -113,7 +113,7 @@ class _DebtCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final colors = AppColors.of(context);
-    final status = debtStatus(debt);
+    final status = debtStatus(debt, asOf: now);
     final monthly = monthlyPaymentFor(debt, status.outstandingPaise);
     final plan = debt.owedToMe
         ? null
@@ -269,9 +269,11 @@ class _DebtFreePlannerState extends State<DebtFreePlanner> {
     final now = widget.store.now();
     final plans = {
       for (final strategy in PayoffStrategy.values)
-        strategy: debtFreePlan(widget.store.debts, strategy, extraPaise: extra),
+        strategy: debtFreePlan(widget.store.debts, strategy,
+            extraPaise: extra, asOf: now),
     };
-    final base = debtFreePlan(widget.store.debts, PayoffStrategy.avalanche);
+    final base = debtFreePlan(widget.store.debts, PayoffStrategy.avalanche,
+        asOf: now);
     final best = plans.entries
         .where((item) => item.value != null)
         .fold<MapEntry<PayoffStrategy, DebtFreePlan?>?>(
@@ -576,7 +578,7 @@ class _PaymentForm extends StatefulWidget {
 class _PaymentFormState extends State<_PaymentForm> {
   final _formKey = GlobalKey<FormState>();
   late final _amount = TextEditingController(text: () {
-    final outstanding = debtStatus(widget.debt).outstandingPaise;
+    final outstanding = debtStatus(widget.debt, asOf: widget.store.now()).outstandingPaise;
     final usual = monthlyPaymentFor(widget.debt, outstanding);
     final suggested = usual > 0 && usual < outstanding ? usual : outstanding;
     return suggested > 0 ? paiseToInput(suggested) : '';
@@ -605,7 +607,7 @@ class _PaymentFormState extends State<_PaymentForm> {
             Text(debt.owedToMe ? 'Repayment received' : 'Payment made',
                 style: Theme.of(context).textTheme.headlineSmall),
             Text(
-                '${debt.name} · ${formatMoney(debtStatus(debt).outstandingPaise)} outstanding'),
+                '${debt.name} · ${formatMoney(debtStatus(debt, asOf: widget.store.now()).outstandingPaise)} outstanding'),
             const SizedBox(height: 16),
             TextFormField(
               controller: _amount,
@@ -643,19 +645,25 @@ class _PaymentFormState extends State<_PaymentForm> {
             FilledButton(
               onPressed: () async {
                 if (!_formKey.currentState!.validate()) return;
-                final updated = await widget.store.addDebtPayment(
-                  debt.id,
-                  amountPaise: parseRupeesToPaise(_amount.text)!,
-                  at: _date,
-                  recordExpense: _record,
-                );
-                if (!context.mounted) return;
-                showMessage(
-                    context,
-                    updated.closed
-                        ? '${debt.name} is cleared!'
-                        : '${formatMoney(debtStatus(updated).outstandingPaise)} left on ${debt.name}');
-                Navigator.pop(context);
+                try {
+                  final updated = await widget.store.addDebtPayment(
+                    debt.id,
+                    amountPaise: parseRupeesToPaise(_amount.text)!,
+                    at: _date,
+                    recordExpense: _record,
+                  );
+                  if (!context.mounted) return;
+                  showMessage(
+                      context,
+                      updated.closed
+                          ? '${debt.name} is cleared!'
+                          : '${formatMoney(debtStatus(updated, asOf: widget.store.now()).outstandingPaise)} left on ${debt.name}');
+                  Navigator.pop(context);
+                } on Object catch (error) {
+                  if (context.mounted) {
+                    showMessage(context, '$error', error: true);
+                  }
+                }
               },
               child: const Text('Save payment'),
             ),
@@ -740,9 +748,16 @@ class _SplitFormState extends State<_SplitForm> {
                   labelText: 'Total paid',
                   prefixText: '${MoneyFormat.symbol} '),
               onChanged: (_) => setState(() {}),
-              validator: (value) => parseRupeesToPaise(value ?? '') == null
-                  ? 'Enter an amount greater than zero.'
-                  : null,
+              validator: (value) {
+                final parsed = parseRupeesToPaise(value ?? '');
+                if (parsed == null) {
+                  return 'Enter an amount greater than zero.';
+                }
+                if (parsed ~/ (_names.length + 1) <= 0) {
+                  return 'Each share would be less than ₹0.01.';
+                }
+                return null;
+              },
             ),
             const SizedBox(height: 12),
             TextFormField(
@@ -770,19 +785,28 @@ class _SplitFormState extends State<_SplitForm> {
             if (total != null && _names.isNotEmpty)
               Padding(
                 padding: const EdgeInsets.only(top: 12),
-                child: Text('$ways ways: ${formatMoney(total ~/ ways)} each.'),
+                child: Text(total ~/ ways <= 0
+                    ? 'Too small to split $ways ways.'
+                    : '$ways ways: ${formatMoney(total ~/ ways)} each.'),
               ),
             const SizedBox(height: 16),
             FilledButton(
               onPressed: () async {
                 if (!_formKey.currentState!.validate()) return;
-                await widget.store.splitBill(
-                  title: _title.text,
-                  totalPaise: parseRupeesToPaise(_amount.text)!,
-                  people: _names,
-                  category: _category,
-                );
-                if (context.mounted) Navigator.pop(context);
+                try {
+                  await widget.store.splitBill(
+                    title: _title.text,
+                    totalPaise: parseRupeesToPaise(_amount.text)!,
+                    people: _names,
+                    category: _category,
+                  );
+                  if (context.mounted) Navigator.pop(context);
+                } on Object catch (error) {
+                  if (context.mounted) {
+                    showMessage(context, 'Could not split the bill: $error',
+                        error: true);
+                  }
+                }
               },
               child: const Text('Split'),
             ),

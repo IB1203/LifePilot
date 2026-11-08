@@ -261,6 +261,7 @@ class _QuickActions extends StatelessWidget {
     ('reminder', Icons.alarm_add, 'Reminder'),
     ('note', Icons.sticky_note_2_outlined, 'Note'),
     ('focus', Icons.timer_outlined, 'Focus'),
+    ('transfer', Icons.swap_horiz, 'Move money'),
   ];
 
   @override

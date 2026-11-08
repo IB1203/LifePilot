@@ -64,8 +64,16 @@ class _TaxPageState extends State<TaxPage> {
   void _fillFromRecords() {
     final now = store.now();
     final range = DateRange(DateTime(now.year - 1, now.month, now.day), now);
-    final salary = sumEntries(store.entries,
-        kind: EntryKind.income, range: range, category: 'Salary');
+    bool salaryLike(LedgerEntry entry) {
+      final text = '${entry.category} ${entry.title}'.toLowerCase();
+      return text.contains('salary') || text.contains('pension');
+    }
+    final salary = store.entries
+        .where((entry) =>
+            entry.kind == EntryKind.income &&
+            range.contains(entry.occurredAt) &&
+            salaryLike(entry))
+        .fold(0, (sum, entry) => sum + entry.amountPaise);
     final all = sumEntries(store.entries, kind: EntryKind.income, range: range);
     setState(() {
       _salary.text = salary == 0 ? '' : '${salary ~/ 100}';
@@ -80,10 +88,16 @@ class _TaxPageState extends State<TaxPage> {
     final theme = Theme.of(context);
     final active = store.taxRulesFor(_year);
     final rules = parseTaxRules(active.source);
-    _gstRate ??= rules.gstRates
-        .firstWhere((item) => item.rate == 18,
-            orElse: () => rules.gstRates.first)
-        .rate;
+    final keepsRate = _gstRate != null &&
+        rules.gstRates.any((item) => item.rate == _gstRate);
+    _gstRate = keepsRate
+        ? _gstRate
+        : (rules.gstRates.isNotEmpty
+            ? rules.gstRates
+                .firstWhere((item) => item.rate == 18,
+                    orElse: () => rules.gstRates.first)
+                .rate
+            : 18);
     final input = TaxInput(
       salary: _int(_salary),
       otherIncome: _int(_other),

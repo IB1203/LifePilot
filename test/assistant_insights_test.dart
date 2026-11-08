@@ -141,7 +141,7 @@ void main() {
       emiPaise: 500000,
     );
     final debts = ask('How are my debts?');
-    expect(debts, contains('You owe ₹60,000.00'));
+    expect(debts, contains('You owe ₹60,133.15'));
     expect(debts, contains('Bike loan'));
 
     await store.addInvestment(
@@ -154,8 +154,8 @@ void main() {
     expect(ask('How are my investments?'),
         contains('Invested ₹50,000.00, now worth ₹60,000.00'));
 
-    // ₹2,00,000 account + ₹60,000 investments − ₹60,000 loan.
-    expect(ask('What is my net worth?'), contains('Net worth: ₹2,00,000.00'));
+    // ₹2,00,000 account + ₹60,000 investments − ₹60,133.15 loan (with interest).
+    expect(ask('What is my net worth?'), contains('Net worth: ₹1,99,866.85'));
     expect(ask('What is my financial health score?'),
         contains('Financial health:'));
   });

@@ -280,6 +280,16 @@ SmsImport buildSmsImport(LifePilotStore store, Iterable<SmsMessage> messages) {
         if (account.name.contains(hint)) accountId = account.id;
       }
     }
+    // Fall back to matching the bank that sent the message against a tracked
+    // account name, so SMS balances and transactions link to the right account.
+    if (accountId == null && bankName != 'your bank') {
+      final bankLower = bankName.toLowerCase();
+      for (final account in store.accounts) {
+        if (account.name.toLowerCase().contains(bankLower)) {
+          accountId = account.id;
+        }
+      }
+    }
     // A recurring entry already recorded around this date for about this
     // amount may be the same payment. Ask rather than silently skip it.
     final recordedRecurring = store.entries

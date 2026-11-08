@@ -250,14 +250,14 @@ String _debts(LifePilotStore store, DateTime now) {
   if (open.isEmpty) {
     return 'No open loans or debts recorded. Add them under Finance › Debts.';
   }
-  final totals = debtTotals(store.debts);
+  final totals = debtTotals(store.debts, asOf: now);
   final lines = <String>[
     'You owe ${_money(totals.owedPaise)}; others owe you ${_money(totals.lentPaise)}.',
     if (totals.monthlyPaise > 0)
       'Monthly payments: ${_money(totals.monthlyPaise)}.',
   ];
   for (final debt in open) {
-    final status = debtStatus(debt);
+    final status = debtStatus(debt, asOf: now);
     if (debt.owedToMe) {
       lines.add(
           '• ${debt.name}${debt.counterparty.isEmpty ? '' : ' (${debt.counterparty})'}: ${_money(status.outstandingPaise)} to get back.');
@@ -269,8 +269,10 @@ String _debts(LifePilotStore store, DateTime now) {
     lines.add('• ${debt.name}: ${_money(status.outstandingPaise)} left'
         '${plan == null ? (monthly > 0 ? ' — the payment does not cover the interest' : '') : ', cleared by ${monthLabel(plan.closesOn)} (${_money(plan.interestPaise)} more interest)'}.');
   }
-  final avalanche = debtFreePlan(store.debts, PayoffStrategy.avalanche);
-  final snowball = debtFreePlan(store.debts, PayoffStrategy.snowball);
+  final avalanche =
+      debtFreePlan(store.debts, PayoffStrategy.avalanche, asOf: now);
+  final snowball =
+      debtFreePlan(store.debts, PayoffStrategy.snowball, asOf: now);
   if (avalanche != null && snowball != null && avalanche.months > 0) {
     final cheaper = avalanche.interestPaise <= snowball.interestPaise
         ? (name: 'highest interest first', plan: avalanche)
@@ -282,7 +284,7 @@ String _debts(LifePilotStore store, DateTime now) {
 }
 
 String _netWorth(LifePilotStore store, DateTime now) {
-  final debts = debtTotals(store.debts);
+  final debts = debtTotals(store.debts, asOf: now);
   final invested = portfolio(store.investments, now).valuePaise;
   final worth = netWorth(
     accounts: store.accounts,
@@ -350,7 +352,7 @@ String _health(LifePilotStore store, DateTime now) {
     bills: store.bills,
     goals: store.goals,
     now: now,
-    monthlyDebtPaise: debtTotals(store.debts).monthlyPaise,
+    monthlyDebtPaise: debtTotals(store.debts, asOf: now).monthlyPaise,
   );
   if (score == null) {
     return 'Not enough data for a health score yet. It needs at least two of: three months of income, a monthly budget, bill payments, or debts with EMIs.';

@@ -71,7 +71,8 @@ Iterable<Insight> _billInsights(List<Bill> bills, DateTime now) sync* {
           ? '${bill.name} is past its due date'
           : '${bill.name} is due ${friendlyDay(bill.nextDueAt, now).toLowerCase()}',
       detail:
-          '${formatMoney(bill.amountPaise)} was due ${formatDate(bill.nextDueAt)}. '
+          '${formatMoney(bill.amountPaise)} '
+          '${overdue ? 'was due' : 'is due'} ${formatDate(bill.nextDueAt)}. '
           '${overdue ? 'It stays unpaid until you confirm a payment.' : 'Mark it paid once you have paid it.'}',
       basis: 'Next due date saved for this bill.',
       level: overdue ? InsightLevel.warning : InsightLevel.attention,

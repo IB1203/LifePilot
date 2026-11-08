@@ -37,7 +37,7 @@ void main() {
       final status = debtStatus(_debt('Car', 100000, rate: 12, payments: [
         DebtPayment(id: '2', amountPaise: 1000000, at: DateTime(2026, 3, 2)),
         DebtPayment(id: '1', amountPaise: 1000000, at: DateTime(2026, 1, 31)),
-      ]));
+      ]), asOf: DateTime(2026, 3, 2));
       // 30 days at 12% on ₹1,00,000 is ₹986.30; then ₹897.40 on the rest.
       expect(status.interestPaidPaise, 98630 + 89740);
       expect(status.principalPaidPaise, 2000000 - 188370);
@@ -47,7 +47,7 @@ void main() {
     test('a payment smaller than the interest leaves the rest owed', () {
       final status = debtStatus(_debt('Car', 100000, rate: 12, payments: [
         DebtPayment(id: '1', amountPaise: 50000, at: DateTime(2026, 1, 31)),
-      ]));
+      ]), asOf: DateTime(2026, 1, 31));
       expect(status.principalPaidPaise, 0);
       expect(status.outstandingPaise, 10000000 + 98630 - 50000);
     });

@@ -222,6 +222,11 @@ class LocalReminderScheduler implements ReminderScheduler {
             importance: Importance.high,
             priority: Priority.high,
             category: AndroidNotificationCategory.reminder,
+            actions: [
+              AndroidNotificationAction(
+                  'mark_paid', 'Mark paid',
+                  showsUserInterface: false),
+            ],
           ),
         ReminderChannel.timers => const AndroidNotificationDetails(
             'lifepilot_timers',

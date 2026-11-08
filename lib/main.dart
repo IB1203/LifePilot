@@ -10,6 +10,7 @@ import 'features/clock_page.dart';
 import 'features/dashboard_page.dart';
 import 'features/finance_page.dart';
 import 'features/lock_screen.dart';
+import 'features/money_extras.dart' show showTransferForm;
 import 'features/more_page.dart';
 import 'features/onboarding_page.dart';
 import 'features/tasks_page.dart';
@@ -299,6 +300,8 @@ class _AppShellState extends State<AppShell> {
           store.focusStart(kind: FocusKind.focus);
         }
         _openClock(ClockTab.focus);
+      case 'transfer':
+        showTransferForm(context, store);
       case 'bill':
         showBillForm(context, store);
     }

@@ -1096,7 +1096,7 @@ class _BillCard extends StatelessWidget {
             message:
                 'The due date returns to ${formatDate(bill.payments.last.dueAt)} and any linked expense is removed.',
             confirmLabel: 'Undo payment')) {
-          await store.undoLastBillPayment(bill.id);
+          await store.billRepository.undoLastBillPayment(bill.id);
         }
       case 'delete':
         if (await confirmAction(context,
@@ -1105,7 +1105,7 @@ class _BillCard extends StatelessWidget {
                 'Its reminders and payment history are removed. Recorded expenses stay.',
             confirmLabel: 'Delete',
             destructive: true)) {
-          await store.deleteBill(bill.id);
+          await store.billRepository.deleteBill(bill.id);
         }
     }
   }

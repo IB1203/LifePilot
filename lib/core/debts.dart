@@ -165,7 +165,7 @@ class DebtStatus {
     required this.principalPaidPaise,
   });
 
-  /// Principal still owed after the last payment.
+  /// Amount still owed, including interest accrued up to the status date.
   final int outstandingPaise;
   final int interestPaidPaise;
   final int principalPaidPaise;
@@ -180,8 +180,10 @@ int _interest(int balance, double ratePercent, DateTime from, DateTime to) {
 }
 
 /// Applies the payments in date order: each first pays the interest that
-/// built up since the previous one, then reduces the principal.
-DebtStatus debtStatus(Debt debt) {
+/// built up since the previous one, then reduces the principal. Interest
+/// accrued since the last payment is added to the outstanding amount up to
+/// [asOf] (default: now).
+DebtStatus debtStatus(Debt debt, {DateTime? asOf}) {
   final payments = [...debt.payments]..sort((a, b) => a.at.compareTo(b.at));
   var balance = debt.openingPaise;
   var since = debt.startDate;
@@ -197,6 +199,10 @@ DebtStatus debtStatus(Debt debt) {
     interestPaid += toInterest;
     principalPaid += toPrincipal;
     since = payment.at;
+  }
+  if (!debt.closed && balance > 0) {
+    balance +=
+        _interest(balance, debt.annualRatePercent, since, asOf ?? DateTime.now());
   }
   return DebtStatus(
     outstandingPaise: balance,
@@ -300,11 +306,16 @@ DebtFreePlan? debtFreePlan(
   Iterable<Debt> debts,
   PayoffStrategy strategy, {
   int extraPaise = 0,
+  DateTime? asOf,
 }) {
   final open = [
     for (final debt in debts)
       if (!debt.closed && !debt.owedToMe)
-        (debt: debt, balance: debtStatus(debt).outstandingPaise.toDouble()),
+        (
+          debt: debt,
+          balance:
+              debtStatus(debt, asOf: asOf).outstandingPaise.toDouble()
+        ),
   ].where((item) => item.balance > 0).toList();
   if (open.isEmpty) {
     return const DebtFreePlan(months: 0, interestPaise: 0, order: []);
@@ -372,12 +383,12 @@ DebtFreePlan? debtFreePlan(
 /// Totals for the summary: what the user owes, what is owed to them, and
 /// the monthly payments on their debts.
 ({int owedPaise, int lentPaise, int monthlyPaise}) debtTotals(
-    Iterable<Debt> debts) {
+    Iterable<Debt> debts, {DateTime? asOf}) {
   var owed = 0;
   var lent = 0;
   var monthly = 0;
   for (final debt in debts.where((debt) => !debt.closed)) {
-    final outstanding = debtStatus(debt).outstandingPaise;
+    final outstanding = debtStatus(debt, asOf: asOf).outstandingPaise;
     if (debt.owedToMe) {
       lent += outstanding;
     } else {

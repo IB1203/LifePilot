@@ -1930,7 +1930,7 @@ class _BillFormState extends State<_BillForm> {
     try {
       final amount = parseRupeesToPaise(_amount.text)!;
       if (widget.bill == null) {
-        await widget.store.addBill(
+        await widget.store.billRepository.addBill(
           name: _name.text,
           kind: _kind,
           amountPaise: amount,
@@ -1940,7 +1940,7 @@ class _BillFormState extends State<_BillForm> {
           notes: _notes.text,
         );
       } else {
-        await widget.store.updateBill(widget.bill!.copyWith(
+        await widget.store.billRepository.updateBill(widget.bill!.copyWith(
           name: _name.text.trim(),
           kind: _kind,
           amountPaise: amount,
@@ -2053,7 +2053,7 @@ class _MarkPaidFormState extends State<_MarkPaidForm> {
   Future<void> _save() async {
     if (_saving || !_formKey.currentState!.validate()) return;
     setState(() => _saving = true);
-    await widget.store.markBillPaid(
+    await widget.store.billRepository.markBillPaid(
       widget.bill.id,
       amountPaise: parseRupeesToPaise(_amount.text),
       paidAt: _paidAt,

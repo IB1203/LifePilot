@@ -10,7 +10,7 @@ import 'task_logic.dart';
 
 /// Recorded balance of an account: opening balance, plus income and minus
 /// expenses linked to it, plus transfers in and minus transfers out. This is
-/// only what the user recorded, not a balance read from a bank.
+/// only what the user recorded, not a balance read from a bank in real time.
 int accountBalance(
   Account account,
   Iterable<LedgerEntry> entries,

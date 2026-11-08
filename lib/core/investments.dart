@@ -211,7 +211,10 @@ int fdValue(
 List<DateTime> rdInstallments(DateTime start, DateTime? maturity, DateTime to) {
   final dates = <DateTime>[];
   for (var month = 0; month < 600; month++) {
-    final date = DateTime(start.year, start.month + month, start.day);
+    final monthStart = DateTime(start.year, start.month + month);
+    final last = DateTime(monthStart.year, monthStart.month + 1, 0).day;
+    final date = DateTime(monthStart.year, monthStart.month,
+        start.day > last ? last : start.day);
     if (date.isAfter(to)) break;
     if (maturity != null && !date.isBefore(maturity)) break;
     dates.add(date);
@@ -246,6 +249,15 @@ List<InvestmentFlow> investedFlows(Investment item, DateTime now) {
 int investedPaise(Investment item, DateTime now) =>
     investedFlows(item, now).fold(0, (sum, flow) => sum + flow.amountPaise);
 
+/// Value of a fixed deposit on [to], growing each dated flow from its own date.
+int _fdFlowsValue(
+        List<InvestmentFlow> flows, double annualRatePercent, DateTime to) =>
+    flows
+        .where((flow) => !flow.at.isAfter(to))
+        .fold(0,
+            (sum, flow) =>
+                sum + fdValue(flow.amountPaise, annualRatePercent, flow.at, to));
+
 /// Value today, with what it is based on.
 ({int paise, String basis})? currentValue(Investment item, DateTime now) {
   final start = item.startDate;
@@ -254,8 +266,7 @@ int investedPaise(Investment item, DateTime now) =>
       : now;
   if (item.kind == InvestmentKind.fixedDeposit && start != null) {
     return (
-      paise:
-          fdValue(investedPaise(item, now), item.annualRatePercent, start, end),
+      paise: _fdFlowsValue(item.flows, item.annualRatePercent, end),
       basis: 'Worked out at ${item.annualRatePercent}% a year',
     );
   }
@@ -282,8 +293,8 @@ int? maturityValue(Investment item) {
   final maturity = item.maturityDate;
   if (start == null || maturity == null) return null;
   return switch (item.kind) {
-    InvestmentKind.fixedDeposit => fdValue(
-        investedPaise(item, maturity), item.annualRatePercent, start, maturity),
+    InvestmentKind.fixedDeposit =>
+      _fdFlowsValue(item.flows, item.annualRatePercent, maturity),
     InvestmentKind.recurringDeposit => rdValue(item.installmentPaise,
         item.annualRatePercent, start, maturity, maturity),
     _ => null,

@@ -968,14 +968,14 @@ class AssistantEngine {
   Future<String> execute(AssistantAction action) async {
     switch (action) {
       case AddBillAction():
-        final bill = await store.addBill(
+        final bill = await store.billRepository.addBill(
           name: action.name,
           kind: action.kind,
           amountPaise: action.amountPaise,
           nextDueAt: action.dueAt,
           recurrence: action.recurrence,
         );
-        if (store.billById(bill.id) == null) {
+        if (store.billRepository.billById(bill.id) == null) {
           return 'The bill could not be verified after saving. Please check Finance › Bills.';
         }
         return 'Tracking “${bill.name}”: ${_money(bill.amountPaise)}, next due ${formatDate(bill.nextDueAt)}. You will be reminded ${bill.remindDaysBefore} days before, if notifications are allowed.';

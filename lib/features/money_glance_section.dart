@@ -6,8 +6,11 @@ import '../core/formatters.dart';
 import '../core/investments.dart' show portfolio;
 import '../core/local_store.dart';
 import '../core/money_glance.dart';
+import '../core/models.dart';
+import '../core/personal.dart' show accountBalance;
 import '../ui/theme.dart';
 import '../ui/widgets.dart';
+import '../ui/forms.dart' show showMarkPaidForm;
 
 /// Home section: money available, spent, saved and coming up, with a
 /// safe-to-spend amount, month-end forecast, net worth and health score.
@@ -39,6 +42,16 @@ class MoneyGlanceSection extends StatelessWidget {
         bills: store.bills, rules: store.recurring, now: now);
     final upcomingTotal =
         upcoming.fold(0, (sum, item) => sum + item.amountPaise);
+    final dueSoon = upcomingBills(store.bills, now, withinDays: 3)
+      ..sort((a, b) => a.nextDueAt.compareTo(b.nextDueAt));
+    final budgetWarnings = <SpendingBudget>[];
+    for (final budget in store.budgets
+        .where((b) => b.period == BudgetPeriod.monthly)) {
+      final projected = budgetForecast(budget, store.entries, now);
+      if (projected != null && projected.willExceed) {
+        budgetWarnings.add(budget);
+      }
+    }
     final safe = safeToSpendToday(
       entries: store.entries,
       budgets: store.budgets,
@@ -54,7 +67,7 @@ class MoneyGlanceSection extends StatelessWidget {
     final budgets = monthlyBudgetTotals(store.budgets, store.entries, now);
     final overBudget =
         budgets.limitPaise > 0 && forecast.projectedPaise > budgets.limitPaise;
-    final debt = debtTotals(store.debts);
+    final debt = debtTotals(store.debts, asOf: now);
     final worth = netWorth(
       accounts: store.accounts,
       entries: store.entries,
@@ -132,8 +145,111 @@ class MoneyGlanceSection extends StatelessWidget {
                   : '${upcoming.length} payment${upcoming.length == 1 ? '' : 's'} · next ${upcoming.first.title}',
               onTap: onOpen,
             ),
+            for (final account in store.accounts.where((item) => !item.archived).take(4))
+              StatTile(
+                label: account.name,
+                value: formatMoney(accountBalance(account, store.entries, store.transfers)),
+                icon: _accountIcon(account.kind),
+                color: accountBalance(account, store.entries, store.transfers) < 0
+                    ? colors.expense
+                    : null,
+                caption: '${account.kind.label} · tap to open Finance',
+                onTap: onOpen,
+              ),
           ],
         ),
+        if (dueSoon.isNotEmpty) ...[
+          const SizedBox(height: 12),
+          Card(
+            color: Theme.of(context).colorScheme.errorContainer,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(Icons.event_busy_outlined,
+                          color: Theme.of(context).colorScheme.error),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text('Bills due soon',
+                            style: theme.textTheme.titleMedium
+                                ?.copyWith(fontWeight: FontWeight.w700)),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  for (final bill in dueSoon.take(3))
+                    ListTile(
+                      dense: true,
+                      title: Text(bill.name),
+                      subtitle: Text(
+                        isBillOverdue(bill, now)
+                            ? 'Overdue since ${formatDate(bill.nextDueAt)}'
+                            : 'Due ${friendlyDay(bill.nextDueAt, now)}',
+                      ),
+                      trailing: Text(formatMoney(bill.amountPaise),
+                          style: theme.textTheme.titleSmall?.copyWith(
+                              fontWeight: FontWeight.w700)),
+                      onTap: () => showMarkPaidForm(context, store, bill),
+                    ),
+                  if (dueSoon.length > 3)
+                    Padding(
+                      padding: const EdgeInsets.only(left: 16, bottom: 8),
+                      child: Text(
+                          '+${dueSoon.length - 3} more due soon',
+                          style: muted),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ],
+        if (budgetWarnings.isNotEmpty) ...[
+          const SizedBox(height: 12),
+          Card(
+            color: Theme.of(context).colorScheme.errorContainer,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(Icons.trending_up,
+                          color: Theme.of(context).colorScheme.error),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text('Budget may exceed limit',
+                            style: theme.textTheme.titleMedium
+                                ?.copyWith(fontWeight: FontWeight.w700)),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  for (final budget in budgetWarnings.take(3))
+                    ListTile(
+                      dense: true,
+                      title: Text(budget.category),
+                      subtitle: const Text('Monthly budget · on track to exceed'),
+                      trailing: Text(
+                          '${formatMoney(budget.limitPaise)} limit',
+                          style: theme.textTheme.bodySmall),
+                      onTap: () => onOpen(),
+                    ),
+                  if (budgetWarnings.length > 3)
+                    Padding(
+                      padding: const EdgeInsets.only(left: 16, bottom: 8),
+                      child: Text(
+                          '+${budgetWarnings.length - 3} more at risk',
+                          style: muted),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ],
         const SizedBox(height: 10),
         Card(
           child: Padding(
@@ -267,3 +383,13 @@ Future<void> showHealthScore(BuildContext context, HealthScore? health) =>
         );
       },
     );
+
+
+IconData _accountIcon(AccountKind kind) => switch (kind) {
+      AccountKind.cash => Icons.payments_outlined,
+      AccountKind.bank => Icons.account_balance_outlined,
+      AccountKind.upi => Icons.qr_code_2,
+      AccountKind.card => Icons.credit_card,
+      AccountKind.wallet => Icons.account_balance_wallet_outlined,
+      AccountKind.other => Icons.savings_outlined,
+    };

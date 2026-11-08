@@ -8,7 +8,6 @@ import '../core/cash_plan.dart' show occurrences;
 import '../core/formatters.dart';
 import '../core/local_store.dart';
 import '../core/models.dart';
-import '../core/personal.dart';
 import '../core/sms_import.dart';
 import '../core/recurrence.dart';
 import '../core/recurring_detect.dart';
@@ -38,7 +37,7 @@ class AccountsTab extends StatelessWidget {
     final total = active.fold<int>(
         0,
         (sum, account) =>
-            sum + accountBalance(account, store.entries, store.transfers));
+            sum + store.accountRunningBalance(account.id));
     final unlinked =
         store.entries.where((entry) => entry.accountId == null).length;
     final recentTransfers = [...store.transfers]
@@ -158,7 +157,7 @@ class _AccountTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final balance = accountBalance(account, store.entries, store.transfers);
+    final balance = store.accountRunningBalance(account.id);
     final count =
         store.entries.where((entry) => entry.accountId == account.id).length;
     return ListTile(
@@ -212,212 +211,309 @@ class _AccountTile extends StatelessWidget {
 
 Future<void> showAccountForm(BuildContext context, LifePilotStore store,
     {Account? account}) async {
-  final name = TextEditingController(text: account?.name ?? '');
-  final opening = TextEditingController(
-      text: account == null || account.openingBalancePaise == 0
-          ? ''
-          : paiseToInput(account.openingBalancePaise.abs()));
-  var negative = (account?.openingBalancePaise ?? 0) < 0;
-  var kind = account?.kind ?? AccountKind.bank;
-  final formKey = GlobalKey<FormState>();
   await showModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
-    builder: (sheetContext) => StatefulBuilder(
-      builder: (sheetContext, setSheetState) => Padding(
-        padding: EdgeInsets.fromLTRB(
-            20, 0, 20, 20 + MediaQuery.viewInsetsOf(sheetContext).bottom),
-        child: Form(
-          key: formKey,
-          child: ListView(
-            shrinkWrap: true,
-            children: [
-              Text(account == null ? 'Add account' : 'Edit account',
-                  style: Theme.of(sheetContext).textTheme.headlineSmall),
-              const SizedBox(height: 16),
-              Wrap(
-                spacing: 8,
-                runSpacing: 4,
-                children: [
-                  for (final option in AccountKind.values)
-                    ChoiceChip(
-                      avatar: Icon(accountIcon(option), size: 18),
-                      label: Text(option.label),
-                      selected: kind == option,
-                      onSelected: (_) => setSheetState(() {
-                        if (name.text.isEmpty || name.text == kind.label) {
-                          name.text = option.label;
-                        }
-                        kind = option;
-                      }),
-                    ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              TextFormField(
-                controller: name,
-                textCapitalization: TextCapitalization.words,
-                decoration: const InputDecoration(
-                    labelText: 'Name', hintText: 'e.g. HDFC savings'),
-                validator: (value) => value == null || value.trim().isEmpty
-                    ? 'Name the account.'
-                    : null,
-              ),
-              const SizedBox(height: 12),
-              TextFormField(
-                controller: opening,
-                keyboardType:
-                    const TextInputType.numberWithOptions(decimal: true),
-                inputFormatters: [
-                  FilteringTextInputFormatter.allow(RegExp(r'[\d.,]'))
-                ],
-                decoration: InputDecoration(
-                  labelText: 'Opening balance (optional)',
-                  prefixText: '${negative ? '−' : ''}${MoneyFormat.symbol} ',
-                  helperText:
-                      'What the account held when you started tracking it here.',
-                ),
-                validator: (value) => value == null ||
-                        value.trim().isEmpty ||
-                        parseRupeesToPaise(value) != null
-                    ? null
-                    : 'Enter a valid amount.',
-              ),
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                title: const Text('Starts in debt (e.g. card dues)'),
-                value: negative,
-                onChanged: (value) => setSheetState(() => negative = value),
-              ),
-              const SizedBox(height: 8),
-              FilledButton(
-                onPressed: () async {
-                  if (!formKey.currentState!.validate()) return;
-                  final amount = (parseRupeesToPaise(opening.text) ?? 0) *
-                      (negative ? -1 : 1);
-                  if (account == null) {
-                    await store.addAccount(name.text, kind,
-                        openingBalancePaise: amount);
-                  } else {
-                    await store.updateAccount(account.copyWith(
-                        name: name.text.trim(),
-                        kind: kind,
-                        openingBalancePaise: amount));
-                  }
-                  if (sheetContext.mounted) Navigator.pop(sheetContext);
-                },
-                child: const Text('Save account'),
-              ),
-            ],
-          ),
-        ),
-      ),
+    builder: (sheetContext) => _AccountFormSheet(
+      store: store,
+      account: account,
     ),
   );
-  name.dispose();
-  opening.dispose();
+}
+
+/// Sheet content for adding or editing an account. Owns its text controllers
+/// and disposes them when the sheet widget is disposed (after the exit
+/// animation), avoiding "used after being disposed" crashes.
+class _AccountFormSheet extends StatefulWidget {
+  const _AccountFormSheet({required this.store, required this.account});
+
+  final LifePilotStore store;
+  final Account? account;
+
+  @override
+  State<_AccountFormSheet> createState() => _AccountFormSheetState();
+}
+
+class _AccountFormSheetState extends State<_AccountFormSheet> {
+  late final TextEditingController name;
+  late final TextEditingController opening;
+  var negative = false;
+  var kind = AccountKind.bank;
+  final formKey = GlobalKey<FormState>();
+
+  @override
+  void initState() {
+    super.initState();
+    final account = widget.account;
+    name = TextEditingController(text: account?.name ?? '');
+    opening = TextEditingController(
+      text: account == null || account.openingBalancePaise == 0
+          ? ''
+          : paiseToInput(account.openingBalancePaise.abs()));
+    negative = (account?.openingBalancePaise ?? 0) < 0;
+    kind = account?.kind ?? AccountKind.bank;
+  }
+
+  @override
+  void dispose() {
+    name.dispose();
+    opening.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final account = widget.account;
+    return Padding(
+      padding: EdgeInsets.fromLTRB(
+          20, 0, 20, 20 + MediaQuery.viewInsetsOf(context).bottom),
+      child: Form(
+        key: formKey,
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            Text(account == null ? 'Add account' : 'Edit account',
+                style: Theme.of(context).textTheme.headlineSmall),
+            const SizedBox(height: 16),
+            Wrap(
+              spacing: 8,
+              runSpacing: 4,
+              children: [
+                for (final option in AccountKind.values)
+                  ChoiceChip(
+                    avatar: Icon(accountIcon(option), size: 18),
+                    label: Text(option.label),
+                    selected: kind == option,
+                    onSelected: (_) => setState(() {
+                      if (name.text.isEmpty || name.text == kind.label) {
+                        name.text = option.label;
+                      }
+                      kind = option;
+                    }),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            TextFormField(
+              controller: name,
+              textCapitalization: TextCapitalization.words,
+              decoration: const InputDecoration(
+                  labelText: 'Name', hintText: 'e.g. HDFC savings'),
+              validator: (value) => value == null || value.trim().isEmpty
+                  ? 'Name the account.'
+                  : null,
+            ),
+            const SizedBox(height: 12),
+            TextFormField(
+              controller: opening,
+              keyboardType:
+                  const TextInputType.numberWithOptions(decimal: true),
+              inputFormatters: [
+                FilteringTextInputFormatter.allow(RegExp(r'[\d.,]'))
+              ],
+              decoration: InputDecoration(
+                labelText: 'Opening balance (optional)',
+                prefixText: '${negative ? '−' : ''}${MoneyFormat.symbol} ',
+                helperText:
+                    'What the account held when you started tracking it here.',
+              ),
+              validator: (value) => value == null ||
+                      value.trim().isEmpty ||
+                      parseRupeesToPaise(value) != null
+                  ? null
+                  : 'Enter a valid amount.',
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Starts in debt (e.g. card dues)'),
+              value: negative,
+              onChanged: (value) => setState(() => negative = value),
+            ),
+            const SizedBox(height: 8),
+            FilledButton(
+              onPressed: () async {
+                if (!formKey.currentState!.validate()) return;
+                final amount =
+                    (parseRupeesToPaise(opening.text) ?? 0) *
+                        (negative ? -1 : 1);
+                if (account == null) {
+                  await widget.store.addAccount(name.text, kind,
+                      openingBalancePaise: amount);
+                } else {
+                  await widget.store.updateAccount(account.copyWith(
+                      name: name.text.trim(),
+                      kind: kind,
+                      openingBalancePaise: amount));
+                }
+                if (context.mounted) Navigator.pop(context);
+              },
+              child: const Text('Save account'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 Future<void> showTransferForm(
     BuildContext context, LifePilotStore store) async {
   final active = store.accounts.where((account) => !account.archived).toList();
   if (active.length < 2) return;
-  var from = active[0].id;
-  var to = active[1].id;
-  final amount = TextEditingController();
-  final note = TextEditingController();
-  final formKey = GlobalKey<FormState>();
-  String? error;
   await showModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
-    builder: (sheetContext) => StatefulBuilder(
-      builder: (sheetContext, setSheetState) => Padding(
-        padding: EdgeInsets.fromLTRB(
-            20, 0, 20, 20 + MediaQuery.viewInsetsOf(sheetContext).bottom),
-        child: Form(
-          key: formKey,
-          child: ListView(
-            shrinkWrap: true,
-            children: [
-              Text('Move money',
-                  style: Theme.of(sheetContext).textTheme.headlineSmall),
-              const SizedBox(height: 4),
-              const Text(
-                  'A transfer between your own accounts. It is not counted as income or an expense.'),
-              const SizedBox(height: 16),
-              DropdownButtonFormField<String>(
-                initialValue: from,
-                decoration: const InputDecoration(labelText: 'From'),
-                items: [
-                  for (final account in active)
-                    DropdownMenuItem(
-                        value: account.id, child: Text(account.name)),
-                ],
-                onChanged: (value) => setSheetState(() => from = value ?? from),
-              ),
-              const SizedBox(height: 12),
-              DropdownButtonFormField<String>(
-                initialValue: to,
-                decoration: const InputDecoration(labelText: 'To'),
-                items: [
-                  for (final account in active)
-                    DropdownMenuItem(
-                        value: account.id, child: Text(account.name)),
-                ],
-                onChanged: (value) => setSheetState(() => to = value ?? to),
-              ),
-              const SizedBox(height: 12),
-              TextFormField(
-                controller: amount,
-                autofocus: true,
-                keyboardType:
-                    const TextInputType.numberWithOptions(decimal: true),
-                decoration: InputDecoration(
-                    labelText: 'Amount', prefixText: '${MoneyFormat.symbol} '),
-                validator: (value) => parseRupeesToPaise(value ?? '') == null
-                    ? 'Enter an amount greater than zero.'
-                    : null,
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: note,
-                decoration: const InputDecoration(labelText: 'Note (optional)'),
-              ),
-              if (error != null)
-                Padding(
-                  padding: const EdgeInsets.only(top: 8),
-                  child: Text(error!,
-                      style: TextStyle(
-                          color: Theme.of(sheetContext).colorScheme.error)),
-                ),
-              const SizedBox(height: 12),
-              FilledButton(
-                onPressed: () async {
-                  if (!formKey.currentState!.validate()) return;
-                  if (from == to) {
-                    setSheetState(
-                        () => error = 'Choose two different accounts.');
-                    return;
-                  }
-                  await store.addTransfer(
-                    fromAccountId: from,
-                    toAccountId: to,
-                    amountPaise: parseRupeesToPaise(amount.text)!,
-                    note: note.text,
-                  );
-                  if (sheetContext.mounted) Navigator.pop(sheetContext);
-                },
-                child: const Text('Save transfer'),
-              ),
-            ],
-          ),
-        ),
-      ),
+    builder: (sheetContext) => _TransferFormSheet(
+      store: store,
+      active: active,
     ),
   );
-  amount.dispose();
-  note.dispose();
+}
+
+/// Sheet content for moving money between accounts. Owns its text controllers
+/// and disposes them when the sheet widget is disposed (after the exit
+/// animation), avoiding "used after being disposed" crashes.
+class _TransferFormSheet extends StatefulWidget {
+  const _TransferFormSheet({required this.store, required this.active});
+
+  final LifePilotStore store;
+  final List<Account> active;
+
+  @override
+  State<_TransferFormSheet> createState() => _TransferFormSheetState();
+}
+
+class _TransferFormSheetState extends State<_TransferFormSheet> {
+  late final TextEditingController amount;
+  late final TextEditingController note;
+  var from = '';
+  var to = '';
+  String? error;
+  final formKey = GlobalKey<FormState>();
+
+  @override
+  void initState() {
+    super.initState();
+    from = widget.active[0].id;
+    to = widget.active[1].id;
+    amount = TextEditingController();
+    note = TextEditingController();
+  }
+
+  @override
+  void dispose() {
+    amount.dispose();
+    note.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.fromLTRB(
+          20, 0, 20, 20 + MediaQuery.viewInsetsOf(context).bottom),
+      child: Form(
+        key: formKey,
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            Text('Move money',
+                style: Theme.of(context).textTheme.headlineSmall),
+            const SizedBox(height: 4),
+            const Text(
+                'A transfer between your own accounts. It is not counted as income or an expense.'),
+            const SizedBox(height: 16),
+            DropdownButtonFormField<String>(
+              initialValue: from,
+              decoration: const InputDecoration(labelText: 'From'),
+              items: [
+                for (final account in widget.active)
+                  DropdownMenuItem(
+                    value: account.id,
+                    child: Text(
+                      '${account.name} · ${account.kind.label} '
+                      '(${formatMoney(widget.store.accountRunningBalance(account.id))})',
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+              ],
+              onChanged: (value) => setState(() => from = value ?? from),
+            ),
+            const SizedBox(height: 12),
+            DropdownButtonFormField<String>(
+              initialValue: to,
+              decoration: const InputDecoration(labelText: 'To'),
+              items: [
+                for (final account in widget.active)
+                  DropdownMenuItem(
+                    value: account.id,
+                    child: Text(
+                      '${account.name} · ${account.kind.label} '
+                      '(${formatMoney(widget.store.accountRunningBalance(account.id))})',
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+              ],
+              onChanged: (value) => setState(() => to = value ?? to),
+            ),
+            const SizedBox(height: 12),
+            TextFormField(
+              controller: amount,
+              autofocus: true,
+              keyboardType:
+                  const TextInputType.numberWithOptions(decimal: true),
+              decoration: InputDecoration(
+                  labelText: 'Amount', prefixText: '${MoneyFormat.symbol} '),
+              validator: (value) => parseRupeesToPaise(value ?? '') == null
+                  ? 'Enter an amount greater than zero.'
+                  : null,
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: note,
+              decoration: const InputDecoration(labelText: 'Note (optional)'),
+            ),
+            if (error != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text(error!,
+                    style: TextStyle(
+                        color: Theme.of(context).colorScheme.error)),
+              ),
+            const SizedBox(height: 12),
+            FilledButton(
+              onPressed: () async {
+                if (!formKey.currentState!.validate()) return;
+                if (from == to) {
+                  setState(
+                      () => error = 'Choose two different accounts.');
+                  return;
+                }
+                final amountPaise = parseRupeesToPaise(amount.text)!;
+                final fromAccount =
+                    widget.active.firstWhere((item) => item.id == from);
+                final fromBalance =
+                    widget.store.accountRunningBalance(fromAccount.id);
+                if (fromBalance < amountPaise) {
+                  setState(() => error =
+                      'Insufficient balance in ${fromAccount.name} (${formatMoney(fromBalance)} available).');
+                  return;
+                }
+                await widget.store.addTransfer(
+                  fromAccountId: from,
+                  toAccountId: to,
+                  amountPaise: amountPaise,
+                  note: note.text,
+                );
+                if (context.mounted) Navigator.pop(context);
+              },
+              child: const Text('Save transfer'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -910,7 +1006,7 @@ class BankBalancesSection extends StatelessWidget {
                         .firstOrNull;
                 final recorded = account == null
                     ? null
-                    : accountBalance(account, store.entries, store.transfers);
+                    : store.accountRunningBalance(account.id);
                 final stale = now.difference(balance.at).inDays >= 7;
                 return ListTile(
                   leading: Icon(balance.isLimit

@@ -1,4 +1,5 @@
 import 'models.dart';
+import 'recurring_detect.dart' show monthlyEquivalent;
 
 /// Half-open date range [start, end).
 class DateRange {
@@ -227,21 +228,25 @@ List<({DateRange range, int limit, int spent})> budgetHistory(
   Iterable<LedgerEntry> entries,
   DateTime now, {
   int count = 6,
-}) =>
-    [
-      for (var offset = -(count - 1); offset <= 0; offset++)
-        () {
-          final range = budgetRange(budget.period, now, offset: offset);
-          return (
-            range: range,
-            limit: budget.limitPaise,
-            spent: sumEntries(entries,
-                kind: EntryKind.expense,
-                range: range,
-                category: budget.category),
-          );
-        }(),
-    ];
+}) {
+  int spentIn(DateRange range) => sumEntries(entries,
+      kind: EntryKind.expense, range: range, category: budget.category);
+  return [
+    for (var offset = -(count - 1); offset <= 0; offset++)
+      () {
+        final range = budgetRange(budget.period, now, offset: offset);
+        var limit = budget.limitPaise;
+        if (budget.rollover) {
+          final previous = spentIn(
+              budgetRange(budget.period, now, offset: offset - 1));
+          if (previous < budget.limitPaise) {
+            limit += budget.limitPaise - previous;
+          }
+        }
+        return (range: range, limit: limit, spent: spentIn(range));
+      }(),
+  ];
+}
 
 /// Whole months between [now] and [target], counting a partial month as one.
 int monthsUntil(DateTime now, DateTime target) {
@@ -271,8 +276,8 @@ int recentMonthlyContribution(SavingsGoal goal, DateTime now, {int days = 90}) {
 }
 
 /// Existing entries that look like the same transaction as [candidate]: same
-/// kind and amount, recorded within [window], with a matching title,
-/// merchant, or category.
+/// kind and amount, recorded within [window], with a matching title or
+/// merchant. Category alone is not enough, since many purchases share one.
 List<LedgerEntry> findPossibleDuplicates(
   Iterable<LedgerEntry> entries,
   LedgerEntry candidate, {
@@ -290,8 +295,7 @@ List<LedgerEntry> findPossibleDuplicates(
     }
     return normal(entry.title) == normal(candidate.title) ||
         (candidate.merchant.isNotEmpty &&
-            normal(entry.merchant) == normal(candidate.merchant)) ||
-        entry.category == candidate.category;
+            normal(entry.merchant) == normal(candidate.merchant));
   }).toList();
 }
 
@@ -314,14 +318,8 @@ bool isBillOverdue(Bill bill, DateTime now) =>
 int monthlyRecurringObligations(Iterable<Bill> bills) {
   var total = 0;
   for (final bill in bills.where((bill) => bill.active)) {
-    total += switch (bill.recurrence.repeat.name) {
-      'monthly' => bill.amountPaise,
-      'quarterly' => bill.amountPaise ~/ 3,
-      'yearly' => bill.amountPaise ~/ 12,
-      'weekly' => bill.amountPaise * 52 ~/ 12,
-      'daily' => bill.amountPaise * 365 ~/ 12,
-      _ => 0,
-    };
+    total += monthlyEquivalent(bill.amountPaise, bill.recurrence.repeat,
+        interval: bill.recurrence.interval);
   }
   return total;
 }

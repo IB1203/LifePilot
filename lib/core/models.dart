@@ -1,4 +1,5 @@
 import 'recurrence.dart';
+import 'validation/finance_validator.dart';
 
 enum EntryKind { expense, income }
 
@@ -738,13 +739,16 @@ class BillPayment {
         'entryId': entryId,
       };
 
-  factory BillPayment.fromJson(Map<String, dynamic> json) => BillPayment(
+  factory BillPayment.fromJson(Map<String, dynamic> json) {
+    FinanceValidator.validateBillPaymentJson(json);
+    return BillPayment(
         id: json['id'] as String,
         dueAt: DateTime.parse(json['dueAt'] as String),
         paidAt: DateTime.parse(json['paidAt'] as String),
         amountPaise: json['amountPaise'] as int,
         entryId: json['entryId'] as String?,
       );
+  }
 }
 
 /// A scheduled obligation. It is only paid when the user confirms a payment;

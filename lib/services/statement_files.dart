@@ -20,7 +20,12 @@ List<List<String>> readStatementTable(String fileName, Uint8List bytes) {
     throw const FormatException(
         'PDF statements cannot be read yet. Download the statement as CSV or Excel from net banking.');
   }
-  var text = utf8.decode(bytes, allowMalformed: true);
+  String text;
+  try {
+    text = utf8.decode(bytes);
+  } on FormatException {
+    text = latin1.decode(bytes);
+  }
   if (text.startsWith('﻿')) text = text.substring(1);
   final sample = text.length > 4000 ? text.substring(0, 4000) : text;
   if ('\t'.allMatches(sample).length > ','.allMatches(sample).length) {
@@ -52,8 +57,24 @@ List<List<String>> _excelRows(Uint8List bytes) {
   final book = xl.Excel.decodeBytes(bytes);
   // The sheet with the most rows is the statement; others are cover pages.
   xl.Sheet? best;
+  int bestRowsWithData = -1;
+  int bestMaxRows = 0;
   for (final sheet in book.tables.values) {
-    if (best == null || sheet.maxRows > best.maxRows) best = sheet;
+    int rowsWithData = 0;
+    for (final row in sheet.rows) {
+      if (row.any((cell) =>
+          cell != null &&
+          cell.value != null &&
+          cell.value.toString().trim().isNotEmpty)) {
+        rowsWithData++;
+      }
+    }
+    if (rowsWithData > bestRowsWithData ||
+        (rowsWithData == bestRowsWithData && sheet.maxRows > bestMaxRows)) {
+      best = sheet;
+      bestRowsWithData = rowsWithData;
+      bestMaxRows = sheet.maxRows;
+    }
   }
   if (best == null) return const [];
   return [

@@ -46,15 +46,19 @@ bool matchesRecurring({
   return !requireName && entry.amountPaise == amountPaise;
 }
 
-/// Monthly equivalent of an amount repeating on [repeat].
-int monthlyEquivalent(int paise, Repeat repeat) => switch (repeat) {
+/// Monthly equivalent of an amount repeating on [repeat]. [interval] is the
+/// number of days between occurrences for [Repeat.everyNDays].
+int monthlyEquivalent(int paise, Repeat repeat, {int interval = 1}) =>
+    switch (repeat) {
       Repeat.monthly => paise,
       Repeat.quarterly => paise ~/ 3,
       Repeat.yearly => paise ~/ 12,
       Repeat.weekly => paise * 52 ~/ 12,
       Repeat.daily => paise * 365 ~/ 12,
       Repeat.weekdays => paise * 261 ~/ 12,
-      _ => 0,
+      Repeat.everyNDays =>
+        paise * 365 ~/ (12 * (interval <= 0 ? 1 : interval)),
+      Repeat.none => 0,
     };
 
 // ---------------------------------------------------------------------------

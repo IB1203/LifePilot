@@ -525,43 +525,68 @@ class _UpiReviewPageState extends State<UpiReviewPage> {
       return;
     }
     setState(() => _paying = true);
-    PaymentHandoff? handoff;
     try {
-      handoff = await store.recordHandoff(
-        payee: _request.displayName,
-        amountPaise: amount,
-        vpa: _request.vpa,
-        appName: _app?.name ?? '',
-        reference: _request.params['tr'] ?? '',
-        fromQr: _request.fromQr,
-      );
+      final PaymentHandoff handoff;
+      try {
+        handoff = await store.recordHandoff(
+          payee: _request.displayName,
+          amountPaise: amount,
+          vpa: _request.vpa,
+          appName: _app?.name ?? '',
+          reference: _request.params['tr'] ?? '',
+          fromQr: _request.fromQr,
+        );
+      } on Object catch (error) {
+        if (mounted) {
+          showMessage(context, 'Could not prepare the payment: $error',
+              error: true);
+        }
+        return;
+      }
       final link = _request.toLink(
           amountPaise: amount, note: _request.isSigned ? null : _note.text);
-      final response =
-          await payWithUpiApp(link, packageName: _app?.packageName);
-      // The app opened, so the payee was real enough to remember.
-      if (_savePayee) {
-        await store.savePayee(_request.displayName, _request.vpa);
+      final UpiResponse response;
+      try {
+        response = await payWithUpiApp(link, packageName: _app?.packageName);
+      } on NoUpiAppException {
+        await store.removeHandoff(handoff.id);
+        if (mounted) {
+          showMessage(
+              context, 'No UPI app on this phone can open this payment.',
+              error: true);
+        }
+        return;
+      } on Object catch (error) {
+        await store.removeHandoff(handoff.id);
+        if (mounted) {
+          showMessage(context, 'The UPI app could not be opened: $error',
+              error: true);
+        }
+        return;
       }
-      final draft = await store.reportHandoffResult(handoff.id, response);
-      if (response.status == UpiReported.success) {
-        await store.notePayeePaid(_request.vpa);
+      // The app opened. From here the handoff must be kept even if saving the
+      // result fails: the payment may already have gone through.
+      var drafted = false;
+      try {
+        if (_savePayee) {
+          await store.savePayee(_request.displayName, _request.vpa);
+        }
+        final draft = await store.reportHandoffResult(handoff.id, response);
+        drafted = draft != null;
+        if (response.status == UpiReported.success) {
+          await store.notePayeePaid(_request.vpa);
+        }
+      } on Object catch (error) {
+        if (mounted) {
+          showMessage(
+              context,
+              'The UPI app was opened, but the result could not be saved: $error',
+              error: true);
+        }
       }
       if (!mounted) return;
-      await _showResult(response, draft != null);
+      await _showResult(response, drafted);
       if (mounted) Navigator.pop(context, true);
-    } on NoUpiAppException {
-      if (handoff != null) await store.removeHandoff(handoff.id);
-      if (mounted) {
-        showMessage(context, 'No UPI app on this phone can open this payment.',
-            error: true);
-      }
-    } on Object catch (error) {
-      if (handoff != null) await store.removeHandoff(handoff.id);
-      if (mounted) {
-        showMessage(context, 'The UPI app could not be opened: $error',
-            error: true);
-      }
     } finally {
       if (mounted) setState(() => _paying = false);
     }

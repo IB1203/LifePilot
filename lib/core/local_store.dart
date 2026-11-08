@@ -9,6 +9,7 @@ import 'finance_calc.dart';
 import 'formatters.dart';
 import 'investments.dart';
 import 'models.dart';
+import 'personal.dart' show accountBalance;
 import 'recurrence.dart';
 import 'recurring_detect.dart';
 import 'reminder_plan.dart';
@@ -17,8 +18,21 @@ import 'sms_import.dart';
 import 'spending_habits.dart';
 import 'statement_import.dart';
 import 'tax_rules.dart';
+import 'validation/finance_validator.dart';
 import 'vault.dart';
 import 'upi.dart';
+import 'repositories/account_repository.dart';
+import 'repositories/bill_repository.dart';
+import 'repositories/budget_repository.dart';
+import 'repositories/debt_repository.dart';
+import 'repositories/entry_repository.dart';
+import 'repositories/investment_repository.dart';
+import 'repositories/life_pilot_budget_repository.dart';
+import 'repositories/life_pilot_debt_repository.dart';
+import 'repositories/life_pilot_entry_repository.dart';
+import 'repositories/life_pilot_investment_repository.dart';
+import 'repositories/life_pilot_account_repository.dart';
+import 'repositories/life_pilot_bill_repository.dart';
 
 /// The single source of truth for on-device records. Data is kept in memory
 /// and written to one versioned JSON file in the app's private support
@@ -90,6 +104,12 @@ class LifePilotStore extends ChangeNotifier {
 
   /// Latest balance or card limit each bank SMS reported, by account.
   final List<BankBalance> bankBalances = [];
+
+  /// Running balance per account id: seeded from the opening balance, set
+  /// from a bank SMS, and adjusted by every linked entry and transfer. When
+  /// absent for an account, the balance is computed from opening plus
+  /// recorded entries instead.
+  final Map<String, int> _accountBalances = {};
 
   /// Recurring suggestions the user said are not recurring.
   final Set<String> dismissedSuggestions = {};
@@ -469,6 +489,37 @@ class LifePilotStore extends ChangeNotifier {
     return null;
   }
 
+  Debt? debtById(String id) {
+    for (final debt in debts) {
+      if (debt.id == id) return debt;
+    }
+    return null;
+  }
+
+  BillRepository get billRepository => _billRepository ??=
+      LifePilotBillRepository(this);
+  BillRepository? _billRepository;
+
+  AccountRepository get accountRepository => _accountRepository ??=
+      LifePilotAccountRepository(this);
+  AccountRepository? _accountRepository;
+
+  DebtRepository get debtRepository => _debtRepository ??=
+      LifePilotDebtRepository(this);
+  DebtRepository? _debtRepository;
+
+  EntryRepository get entryRepository => _entryRepository ??=
+      LifePilotEntryRepository(this);
+  EntryRepository? _entryRepository;
+
+  BudgetRepository get budgetRepository => _budgetRepository ??=
+      LifePilotBudgetRepository(this);
+  BudgetRepository? _budgetRepository;
+
+  InvestmentRepository get investmentRepository => _investmentRepository ??=
+      LifePilotInvestmentRepository(this);
+  InvestmentRepository? _investmentRepository;
+
   // ---------------------------------------------------------------------------
   // Transactions
 
@@ -505,6 +556,8 @@ class LifePilotStore extends ChangeNotifier {
     );
     entries.add(entry);
     await _changed();
+    _adjustAccountBalance(accountId, amountPaise,
+        isIncome: kind == EntryKind.income);
     return entry;
   }
 
@@ -875,7 +928,8 @@ class LifePilotStore extends ChangeNotifier {
     final index = bills.indexWhere((bill) => bill.id == id);
     if (index < 0) return;
     final bill = bills[index];
-    final amount = amountPaise ?? bill.amountPaise;
+    final amount = FinanceValidator.requirePositivePaise(
+        amountPaise ?? bill.amountPaise, 'payment amount');
     final paid = paidAt ?? now();
     String? entryId;
     if (recordExpense) {
@@ -894,6 +948,7 @@ class LifePilotStore extends ChangeNotifier {
     }
     final next = bill.recurrence.next(bill.nextDueAt);
     bills[index] = bill.copyWith(
+      amountPaise: amount,
       nextDueAt: next ?? bill.nextDueAt,
       active: next != null,
       payments: [
@@ -1228,6 +1283,7 @@ class LifePilotStore extends ChangeNotifier {
       openingBalancePaise: openingBalancePaise,
     );
     accounts.add(account);
+    _accountBalances[account.id] = openingBalancePaise;
     await _changed();
     return account;
   }
@@ -1237,6 +1293,42 @@ class LifePilotStore extends ChangeNotifier {
     if (index < 0) throw StateError('That account no longer exists.');
     accounts[index] = updated;
     await _changed();
+  }
+
+  /// Adjusts the running balance of [accountId] by [delta] paise (positive
+  /// for income/credit, negative for expense/debit). Only adjusts when a
+  /// running balance exists (seeded from opening balance or a bank SMS).
+  void _adjustAccountBalance(String? accountId, int amountPaise,
+      {required bool isIncome}) {
+    if (accountId == null) return;
+    if (!_accountBalances.containsKey(accountId)) return;
+    final delta = isIncome ? amountPaise : -amountPaise;
+    _accountBalances[accountId] = (_accountBalances[accountId]!) + delta;
+  }
+
+  /// Matches a bank-reported balance to a tracked account by bank name or
+  /// account hint (last digits), and returns it, or null.
+  Account? _findAccountForBalance(BankBalance balance) {
+    final bankLower = balance.bank.toLowerCase();
+    for (final account in accounts.where((item) => !item.archived)) {
+      final nameLower = account.name.toLowerCase();
+      if (nameLower.contains(bankLower)) return account;
+      if (balance.accountHint != null) {
+        if (account.name.contains(balance.accountHint!)) return account;
+      }
+    }
+    return null;
+  }
+
+  /// Running balance for [accountId]: the last value set by opening balance,
+  /// a bank SMS, or adjusted by linked entries/transfers. Falls back to
+  /// computing from opening balance plus recorded entries when none is set.
+  int accountRunningBalance(String accountId) {
+    if (_accountBalances.containsKey(accountId)) {
+      return _accountBalances[accountId]!;
+    }
+    final account = accounts.firstWhere((item) => item.id == accountId);
+    return accountBalance(account, entries, transfers);
   }
 
   /// Deletes an account. Entries keep their amounts but lose the link, and
@@ -1274,6 +1366,9 @@ class LifePilotStore extends ChangeNotifier {
     );
     transfers.add(transfer);
     await _changed();
+    // Money leaves the source account and arrives at the destination.
+    _adjustAccountBalance(fromAccountId, amountPaise, isIncome: false);
+    _adjustAccountBalance(toAccountId, amountPaise, isIncome: true);
     return transfer;
   }
 
@@ -1484,6 +1579,13 @@ class LifePilotStore extends ChangeNotifier {
       );
     }
     for (final balance in import.balances.values) {
+      // Reconcile the running balance of the matching tracked account with
+      // what the bank SMS reports (the authoritative balance after the
+      // transaction).
+      final account = _findAccountForBalance(balance);
+      if (account != null) {
+        _accountBalances[account.id] = balance.paise;
+      }
       final index = bankBalances.indexWhere((item) => item.key == balance.key);
       if (index < 0) {
         bankBalances.add(balance);
@@ -1593,12 +1695,17 @@ class LifePilotStore extends ChangeNotifier {
     if (index < 0) throw StateError('That debt no longer exists.');
     final debt = debts[index];
     final when = at ?? now();
+    final amount = FinanceValidator.requirePositivePaise(
+        amountPaise, 'payment amount');
+    final owed = debtStatus(debt, asOf: when).outstandingPaise;
+    FinanceValidator.rejectOverpayment(
+        amountPaise: amount, owedPaise: owed, debtName: debt.name);
     var updated = debt.copyWith(payments: [
       ...debt.payments,
       DebtPayment(
           id: _newId(), amountPaise: amountPaise, at: when, note: note.trim()),
     ]);
-    if (debtStatus(updated).outstandingPaise <= 0) {
+    if (debtStatus(updated, asOf: when).outstandingPaise <= 0) {
       updated = updated.copyWith(closed: true);
     }
     debts[index] = updated;
@@ -1637,6 +1744,7 @@ class LifePilotStore extends ChangeNotifier {
     int sipPaise = 0,
     int? sipDay,
   }) async {
+    FinanceValidator.requirePositivePaise(investedPaise, 'invested amount');
     final item = Investment(
       id: _newId(),
       name: name.trim(),
@@ -1806,13 +1914,21 @@ class LifePilotStore extends ChangeNotifier {
     DateTime? at,
     String? accountId,
   }) async {
-    final names = [
-      for (final name in people)
-        if (name.trim().isNotEmpty) name.trim(),
-    ];
+    final names = <String>[];
+    final seen = <String>{};
+    for (final name in people) {
+      final trimmed = name.trim();
+      if (trimmed.isEmpty || !seen.add(trimmed.toLowerCase())) continue;
+      names.add(trimmed);
+    }
     if (names.isEmpty) throw ArgumentError('Add at least one other person.');
     final when = at ?? now();
+    FinanceValidator.requirePositivePaise(totalPaise, 'total amount');
     final share = totalPaise ~/ (names.length + 1);
+    if (share <= 0) {
+      throw ArgumentError(
+          'The bill is too small to split ${names.length + 1} ways.');
+    }
     // The user's share absorbs any paise left over from dividing.
     final mine = totalPaise - share * names.length;
     entries.add(LedgerEntry(
@@ -1929,6 +2045,21 @@ class LifePilotStore extends ChangeNotifier {
     );
     entries.add(entry);
     await _changed();
+    // Auto-adjust the linked account's running balance. When the SMS reported
+    // a balance after this transaction, trust it; otherwise adjust by the
+    // entry amount (income adds, expense subtracts).
+    final accountId = values.accountId;
+    if (accountId != null && _accountBalances.containsKey(accountId)) {
+      final smsBalance = edited == null ? draft.balancePaise : null;
+      if (smsBalance != null) {
+        _accountBalances[accountId] = smsBalance;
+      } else {
+        final current = _accountBalances[accountId]!;
+        final delta =
+            values.isIncome ? values.amountPaise : -values.amountPaise;
+        _accountBalances[accountId] = current + delta;
+      }
+    }
     return entry;
   }
 
