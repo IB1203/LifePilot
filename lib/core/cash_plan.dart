@@ -93,6 +93,9 @@ class CashForecast {
     required this.balances,
     required this.startKnown,
     required this.dailySpendPaise,
+    this.startPaise = 0,
+    this.scheduledIncomePaise = 0,
+    this.scheduledExpensePaise = 0,
   });
 
   /// One entry per day from today.
@@ -107,6 +110,18 @@ class CashForecast {
 
   /// Day-to-day spending assumed for each day.
   final int dailySpendPaise;
+
+  /// The confirmed balance the forecast starts from (zero when unknown).
+  final int startPaise;
+
+  /// Recurring income expected within the horizon.
+  final int scheduledIncomePaise;
+
+  /// Bills and recurring payments due within the horizon.
+  final int scheduledExpensePaise;
+
+  /// The usual day-to-day spending over the whole horizon.
+  int get estimatedSpendPaise => dailySpendPaise * days.length;
 
   int get lowestIndex {
     var index = 0;
@@ -148,6 +163,7 @@ CashForecast forecastCash({
           entry.kind == EntryKind.expense &&
           entry.billId == null &&
           entry.source != 'recurring' &&
+          !isInternalMovement(entry) &&
           !entry.occurredAt.isBefore(since) &&
           entry.occurredAt.isBefore(today))
       .fold(0, (sum, entry) => sum + entry.amountPaise);
@@ -170,6 +186,15 @@ CashForecast forecastCash({
     flows.update(today, (value) => value - bill.amountPaise,
         ifAbsent: () => -bill.amountPaise);
   }
+  var scheduledIncome = 0;
+  var scheduledExpense = 0;
+  for (final value in flows.values) {
+    if (value >= 0) {
+      scheduledIncome += value;
+    } else {
+      scheduledExpense += -value;
+    }
+  }
   var balance = startPaise ?? 0;
   final dayList = <DateTime>[];
   final balances = <int>[];
@@ -184,6 +209,9 @@ CashForecast forecastCash({
     balances: balances,
     startKnown: startPaise != null,
     dailySpendPaise: daily,
+    startPaise: startPaise ?? 0,
+    scheduledIncomePaise: scheduledIncome,
+    scheduledExpensePaise: scheduledExpense,
   );
 }
 
@@ -366,7 +394,12 @@ SalaryPlan? salaryPlan({
     income = past.income ~/ 3;
     incomeBasis = 'Average income of the last three months';
   } else {
-    return null;
+    // Income recorded only this month (a first salary, say) still gives a
+    // plan, instead of showing "No income yet" over real recorded money.
+    final thisMonth = summarize(entries, monthRange(now)).income;
+    if (thisMonth <= 0) return null;
+    income = thisMonth;
+    incomeBasis = 'Income recorded this month';
   }
 
   final lines = <PlanLine>[];
@@ -423,6 +456,7 @@ SalaryPlan? salaryPlan({
             entry.kind == EntryKind.expense &&
             entry.billId == null &&
             entry.source != 'recurring' &&
+            !isInternalMovement(entry) &&
             threeMonths.contains(entry.occurredAt))
         .fold(0, (sum, entry) => sum + entry.amountPaise);
     if (variable > 0) {

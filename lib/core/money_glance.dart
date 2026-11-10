@@ -179,7 +179,8 @@ MonthForecast monthForecast({
       .where((entry) =>
           entry.kind == EntryKind.expense &&
           month.contains(entry.occurredAt) &&
-          !_isFixed(entry))
+          !_isFixed(entry) &&
+          !isInternalMovement(entry))
       .fold(0, (sum, entry) => sum + entry.amountPaise);
   final elapsed = now.day;
   final daysInMonth = DateTime(now.year, now.month + 1, 0).day;
@@ -220,9 +221,128 @@ BudgetForecast? budgetForecast(
       budget.category, status.limitPaise, status.spentPaise + pace * daysLeft);
 }
 
+/// A per-day safe-to-spend amount together with the figures it was worked
+/// out from, so the number can be explained instead of just shown.
+class SafeToSpend {
+  const SafeToSpend({
+    required this.perDayPaise,
+    required this.remainingPaise,
+    required this.basis,
+    required this.days,
+    required this.fundsPaise,
+    required this.fundsLabel,
+    required this.committedPaise,
+    required this.emiPaise,
+    required this.bufferPaise,
+    required this.usingBudgets,
+    this.spentPaise = 0,
+  });
+
+  /// The headline amount that can be spent today.
+  final int perDayPaise;
+
+  /// What is left for the rest of the month before it is split into days.
+  final int remainingPaise;
+  final String basis;
+  final int days;
+
+  /// The pot the figure came from: the available balance, this month's
+  /// income, or the total of the monthly budgets.
+  final int fundsPaise;
+  final String fundsLabel;
+
+  /// Bills and recurring payments still due before the month ends.
+  final int committedPaise;
+  final int emiPaise;
+  final int bufferPaise;
+  final bool usingBudgets;
+
+  /// Spending this month already set aside from the funds. Zero when the
+  /// figure starts from the available balance or a budget limit, which
+  /// already account for it.
+  final int spentPaise;
+}
+
 /// How much can be spent today without breaking the month's plan, with the
-/// basis: monthly budgets left when there are budgets, otherwise income this
-/// month minus spending and what is still due. Null when neither is known.
+/// parts it is based on. The available balance is used when one is known
+/// (it already reflects money already spent); otherwise monthly budgets left,
+/// otherwise income this month minus spending. Bills still due, monthly EMIs
+/// and a buffer are set aside first. Null when nothing is known.
+SafeToSpend? safeToSpend({
+  required Iterable<LedgerEntry> entries,
+  required Iterable<SpendingBudget> budgets,
+  required Iterable<Bill> bills,
+  required Iterable<RecurringEntry> rules,
+  required DateTime now,
+  int? availablePaise,
+  int monthlyEmiPaise = 0,
+  int bufferPaise = 0,
+}) {
+  final daysIncludingToday =
+      DateTime(now.year, now.month + 1, 0).day - now.day + 1;
+  final forecast =
+      monthForecast(entries: entries, bills: bills, rules: rules, now: now);
+  final committed = forecast.committedPaise;
+
+  final totals = monthlyBudgetTotals(budgets, entries, now);
+  if (totals.limitPaise > 0) {
+    final left = totals.remainingPaise < 0 ? 0 : totals.remainingPaise;
+    final free = left - monthlyEmiPaise - bufferPaise;
+    final remaining = free < 0 ? 0 : free;
+    return SafeToSpend(
+      perDayPaise: remaining ~/ daysIncludingToday,
+      remainingPaise: remaining,
+      basis: 'Budgets left this month ÷ $daysIncludingToday days',
+      days: daysIncludingToday,
+      fundsPaise: totals.limitPaise,
+      fundsLabel: 'Monthly budgets',
+      committedPaise: committed,
+      emiPaise: monthlyEmiPaise,
+      bufferPaise: bufferPaise,
+      usingBudgets: true,
+    );
+  }
+
+  final month = summarize(entries, monthRange(now));
+  final int funds;
+  final String fundsLabel;
+  final String basis;
+  final int free;
+  if (availablePaise != null && availablePaise > 0) {
+    funds = availablePaise;
+    fundsLabel = 'Available balance';
+    free = availablePaise - committed - monthlyEmiPaise - bufferPaise;
+    basis =
+        'Available balance − bills still due − EMIs − buffer, ÷ $daysIncludingToday days';
+  } else if (month.income > 0) {
+    funds = month.income;
+    fundsLabel = 'Income this month';
+    free =
+        month.income - month.expenses - committed - monthlyEmiPaise - bufferPaise;
+    basis =
+        'Income this month − spending − bills still due, ÷ $daysIncludingToday days';
+  } else {
+    return null;
+  }
+  final remaining = free < 0 ? 0 : free;
+  return SafeToSpend(
+    perDayPaise: remaining ~/ daysIncludingToday,
+    remainingPaise: remaining,
+    basis: basis,
+    days: daysIncludingToday,
+    fundsPaise: funds,
+    fundsLabel: fundsLabel,
+    committedPaise: committed,
+    emiPaise: monthlyEmiPaise,
+    bufferPaise: bufferPaise,
+    usingBudgets: false,
+    spentPaise: availablePaise != null && availablePaise > 0
+        ? 0
+        : month.expenses,
+  );
+}
+
+/// The headline per-day figure with a short basis line.
 Figure? safeToSpendToday({
   required Iterable<LedgerEntry> entries,
   required Iterable<SpendingBudget> budgets,
@@ -230,26 +350,15 @@ Figure? safeToSpendToday({
   required Iterable<RecurringEntry> rules,
   required DateTime now,
 }) {
-  final daysIncludingToday =
-      DateTime(now.year, now.month + 1, 0).day - now.day + 1;
-  final totals = monthlyBudgetTotals(budgets, entries, now);
-  if (totals.limitPaise > 0) {
-    final left = totals.remainingPaise < 0 ? 0 : totals.remainingPaise;
-    return (
-      paise: left ~/ daysIncludingToday,
-      basis: 'Budgets left this month ÷ $daysIncludingToday days',
-    );
-  }
-  final month = summarize(entries, monthRange(now));
-  if (month.income <= 0) return null;
-  final forecast =
-      monthForecast(entries: entries, bills: bills, rules: rules, now: now);
-  final free = month.income - month.expenses - forecast.committedPaise;
-  return (
-    paise: (free < 0 ? 0 : free) ~/ daysIncludingToday,
-    basis:
-        'Income this month − spending − bills still due, ÷ $daysIncludingToday days',
+  final breakdown = safeToSpend(
+    entries: entries,
+    budgets: budgets,
+    bills: bills,
+    rules: rules,
+    now: now,
   );
+  if (breakdown == null) return null;
+  return (paise: breakdown.perDayPaise, basis: breakdown.basis);
 }
 
 // ---------------------------------------------------------------------------

@@ -287,23 +287,31 @@ class _AppShellState extends State<AppShell> {
     switch (id) {
       case 'expense':
         showEntryForm(context, store, kind: EntryKind.expense);
+        break;
       case 'income':
         showEntryForm(context, store, kind: EntryKind.income);
+        break;
       case 'task':
         showTaskForm(context, store);
+        break;
       case 'reminder':
         showTaskForm(context, store, reminder: true);
+        break;
       case 'note':
         showNoteForm(context, store);
+        break;
       case 'focus':
         if (!store.clock.focus.isActive) {
           store.focusStart(kind: FocusKind.focus);
         }
         _openClock(ClockTab.focus);
+        break;
       case 'transfer':
         showTransferForm(context, store);
+        break;
       case 'bill':
         showBillForm(context, store);
+        break;
     }
   }
 

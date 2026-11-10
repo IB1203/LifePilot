@@ -140,11 +140,14 @@ class _DebtCard extends StatelessWidget {
                         Text(debt.name, style: theme.textTheme.titleMedium),
                         Text(
                           [
-                            debt.kind.label,
-                            if (debt.counterparty.isNotEmpty) debt.counterparty,
-                            if (debt.annualRatePercent > 0)
-                              '${debt.annualRatePercent}% a year',
-                          ].join(' · '),
+                             debt.kind.label,
+                             if (debt.isInterestFreeLending) 'Interest-free',
+                             if (debt.counterparty.isNotEmpty) debt.counterparty,
+                             if (debt.annualRatePercent > 0)
+                               '${debt.annualRatePercent}% a year',
+                             if (debt.dueAt != null)
+                               'Due ${formatDate(debt.dueAt!)}',
+                           ].join(' · '),
                           style: muted,
                         ),
                       ],
@@ -371,6 +374,7 @@ class _DebtFormState extends State<_DebtForm> {
   final _months = TextEditingController();
   late var _kind = widget.debt?.kind ?? DebtKind.loan;
   late var _start = widget.debt?.startDate ?? dateOnly(widget.store.now());
+  late DateTime? _due = widget.debt?.dueAt;
 
   @override
   void dispose() {
@@ -474,6 +478,33 @@ class _DebtFormState extends State<_DebtForm> {
                 if (picked != null) setState(() => _start = picked);
               },
             ),
+            if (_kind == DebtKind.lent)
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.schedule_outlined),
+                title: Text(_due == null
+                    ? 'Expected back (optional)'
+                    : 'Expected back on ${formatDate(_due!)}'),
+                subtitle: _due == null
+                    ? null
+                    : const Text('Reminds you if it is overdue'),
+                trailing: _due == null
+                    ? null
+                    : IconButton(
+                        tooltip: 'Clear date',
+                        icon: const Icon(Icons.close),
+                        onPressed: () => setState(() => _due = null),
+                      ),
+                onTap: () async {
+                  final picked = await showDatePicker(
+                    context: context,
+                    initialDate: _due ?? _start,
+                    firstDate: DateTime(1990),
+                    lastDate: DateTime(2100),
+                  );
+                  if (picked != null) setState(() => _due = picked);
+                },
+              ),
             TextFormField(
               controller: _rate,
               keyboardType:
@@ -541,8 +572,10 @@ class _DebtFormState extends State<_DebtForm> {
         annualRatePercent: rate,
         emiPaise: emi,
         counterparty: _personal ? _person.text : '',
+        dueAt: _kind == DebtKind.lent ? _due : null,
       );
     } else {
+      final dueAt = _kind == DebtKind.lent ? _due : null;
       await widget.store.updateDebt(debt.copyWith(
         name: _name.text.trim(),
         kind: _kind,
@@ -551,6 +584,8 @@ class _DebtFormState extends State<_DebtForm> {
         annualRatePercent: rate,
         emiPaise: emi,
         counterparty: _personal ? _person.text.trim() : '',
+        dueAt: dueAt,
+        clearDueDate: dueAt == null,
       ));
     }
     if (mounted) Navigator.pop(context);
@@ -586,6 +621,8 @@ class _PaymentFormState extends State<_PaymentForm> {
   late var _date = widget.store.now();
   late var _record =
       !widget.debt.owedToMe && widget.debt.kind != DebtKind.borrowed;
+  late var _recordIncome = widget.debt.owedToMe;
+  String? _accountId;
 
   @override
   void dispose() {
@@ -596,6 +633,8 @@ class _PaymentFormState extends State<_PaymentForm> {
   @override
   Widget build(BuildContext context) {
     final debt = widget.debt;
+    final accounts =
+        widget.store.accounts.where((item) => !item.archived).toList();
     return Padding(
       padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
       child: Form(
@@ -641,6 +680,32 @@ class _PaymentFormState extends State<_PaymentForm> {
                 onChanged: (value) => setState(() => _record = value ?? false),
                 title: const Text('Also record as an expense (Loans)'),
               ),
+            if (debt.owedToMe)
+              CheckboxListTile(
+                contentPadding: EdgeInsets.zero,
+                value: _recordIncome,
+                onChanged: (value) =>
+                    setState(() => _recordIncome = value ?? false),
+                title: const Text('Also record as income (money returned)'),
+              ),
+            if ((_record || _recordIncome) && accounts.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              DropdownButtonFormField<String?>(
+                initialValue: _accountId,
+                isExpanded: true,
+                decoration: const InputDecoration(
+                    labelText: 'Account (optional)',
+                    helperText: 'Keeps this account\'s balance in step.'),
+                items: [
+                  const DropdownMenuItem(
+                      value: null, child: Text('No account set')),
+                  for (final account in accounts)
+                    DropdownMenuItem(
+                        value: account.id, child: Text(account.name)),
+                ],
+                onChanged: (value) => setState(() => _accountId = value),
+              ),
+            ],
             const SizedBox(height: 12),
             FilledButton(
               onPressed: () async {
@@ -651,6 +716,8 @@ class _PaymentFormState extends State<_PaymentForm> {
                     amountPaise: parseRupeesToPaise(_amount.text)!,
                     at: _date,
                     recordExpense: _record,
+                    recordIncome: _recordIncome,
+                    accountId: _accountId,
                   );
                   if (!context.mounted) return;
                   showMessage(

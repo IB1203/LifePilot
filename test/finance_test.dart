@@ -6,6 +6,7 @@ import 'package:lifepilot_ai/core/insights.dart';
 import 'package:lifepilot_ai/core/local_store.dart';
 import 'package:lifepilot_ai/core/models.dart';
 import 'package:lifepilot_ai/core/recurrence.dart';
+import 'package:lifepilot_ai/core/spending_habits.dart';
 
 LedgerEntry expense(int rupees, DateTime at,
         {String category = 'Food', String title = 'Lunch', String id = ''}) =>
@@ -63,6 +64,152 @@ void main() {
       expect(summary.income, 5000000);
       expect(summary.expenses, 400000);
       expect(summary.netCashFlow, 4600000);
+    });
+
+    test('internal transfers are never income or expenses', () {
+      final transfer = LedgerEntry(
+        id: 'transfer-1',
+        kind: EntryKind.expense,
+        amountPaise: 500000,
+        category: 'Transfers',
+        title: 'To savings',
+        occurredAt: DateTime(2026, 10, 4),
+        classification: TransactionClassification.transfer,
+      );
+      final ordinary = LedgerEntry(
+        id: 'train',
+        kind: EntryKind.expense,
+        amountPaise: 250000,
+        category: 'Travel',
+        title: 'Train',
+        occurredAt: DateTime(2026, 10, 5),
+      );
+      final summary =
+          summarize([...entries, transfer, ordinary], monthRange(now));
+      expect(summary.expenses, 400000 + 250000,
+          reason: 'the transfer must not be counted as spending');
+      expect(summary.netCashFlow, 5000000 - 650000);
+      final categories =
+          categoryTotals([...entries, transfer, ordinary], monthRange(now));
+      expect(categories['Transfers'], isNull);
+      expect(categories['Transport'], 80000);
+    });
+
+    group('cross-module edit/delete propagation', () {
+      test('editing an amount recalculates all dependent totals', () {
+        final entry = LedgerEntry(
+          id: 'edit-me',
+          kind: EntryKind.expense,
+          amountPaise: 50000,
+          category: 'Food',
+          title: 'Lunch',
+          occurredAt: DateTime(2026, 10, 5),
+        );
+        final all = [...entries, entry];
+        final before = summarize(all, monthRange(now));
+        expect(before.expenses, 450000);
+
+        final edited = entry.copyWith(amountPaise: 80000);
+        final after = summarize(
+          [...entries, edited],
+          monthRange(now),
+        );
+        expect(after.expenses, 400000 + 80000,
+            reason: 'edited amount flows into summary');
+        expect(after.netCashFlow, 5000000 - 480000);
+      });
+
+      test('editing a category moves budget/category totals', () {
+        final entry = LedgerEntry(
+          id: 'recat-me',
+          kind: EntryKind.expense,
+          amountPaise: 60000,
+          category: 'Shopping',
+          title: 'Mall',
+          occurredAt: DateTime(2026, 10, 6),
+        );
+        final all = [...entries, entry];
+        final before = categoryTotals(all, monthRange(now));
+        expect(before['Shopping'], 60000);
+        expect(before['Food'], 320000);
+
+        final recatted = entry.copyWith(category: 'Food');
+        final after = categoryTotals([...entries, recatted], monthRange(now));
+        expect(after['Shopping'], isNull,
+            reason: 'old category total drops');
+        expect(after['Food'], 380000,
+            reason: 'new category total increases');
+        expect(after.values.fold(0, (s, v) => s + v),
+            before.values.fold(0, (s, v) => s + v),
+            reason: 'total spending unchanged by recategorization');
+      });
+
+      test('editing a date moves spending between months', () {
+        final entry = LedgerEntry(
+          id: 'redate-me',
+          kind: EntryKind.expense,
+          amountPaise: 40000,
+          category: 'Transport',
+          title: 'Bus',
+          occurredAt: DateTime(2026, 10, 15),
+        );
+        final octSummary = summarize([...entries, entry], monthRange(now));
+        final nov = DateRange(
+            DateTime(2026, 11), DateTime(2026, 12));
+        final novSummary =
+            summarize([...entries, entry.copyWith(occurredAt: DateTime(2026, 11, 1))], nov);
+        expect(octSummary.expenses, 440000);
+        expect(novSummary.expenses, 40000);
+      });
+
+      test('deleting an entry removes its impact from all modules', () {
+        final entry = LedgerEntry(
+          id: 'delete-me',
+          kind: EntryKind.income,
+          amountPaise: 200000,
+          category: 'Salary',
+          title: 'Bonus',
+          occurredAt: DateTime(2026, 10, 20),
+        );
+        final withEntry = summarize([...entries, entry], monthRange(now));
+        expect(withEntry.income, 5200000);
+
+        final withoutEntry = summarize(entries, monthRange(now));
+        expect(withoutEntry.income, 5000000);
+        expect(withoutEntry.netCashFlow, 4600000);
+      });
+
+      test('smart summary separates transfers from income and expenses', () {
+        final transfer = LedgerEntry(
+          id: 'smart-transfer',
+          kind: EntryKind.expense,
+          amountPaise: 500000,
+          category: 'Transfers',
+          title: 'To savings',
+          occurredAt: DateTime(2026, 10, 4),
+          classification: TransactionClassification.transfer,
+        );
+        final refund = LedgerEntry(
+          id: 'smart-refund',
+          kind: EntryKind.income,
+          amountPaise: 100000,
+          category: 'Refunds',
+          title: 'Refund',
+          occurredAt: DateTime(2026, 10, 5),
+          classification: TransactionClassification.refund,
+        );
+        final smart = smartSummarize(
+          [...entries, transfer, refund],
+          monthRange(now),
+        );
+        expect(smart.expenses, 400000,
+            reason: 'transfer excluded from expenses');
+        expect(smart.internalTransfers, 500000);
+        expect(smart.refunds, 100000);
+        expect(smart.income, 5000000,
+            reason: 'refund separated from income');
+        expect(smart.netCashFlow, 4600000);
+      });
     });
 
     test('month and week ranges are half-open and Monday based', () {
@@ -312,6 +459,111 @@ void main() {
       );
       expect(insights.map((item) => item.id),
           containsAll(['budget-near-Food', 'bill-b']));
+    });
+  });
+
+  group('budget category correction (INT-031)', () {
+    test('recategorizing an expense moves budget utilization', () async {
+      final store = LifePilotStore.inMemory(clock: () => DateTime(2026, 10, 20));
+      await store.setBudget('Food', 500000);
+      await store.setBudget('Transport', 300000);
+
+      // Seed existing Food and Transport spending.
+      await store.addEntry(
+        kind: EntryKind.expense,
+        amountPaise: 320000,
+        category: 'Food',
+        title: 'Groceries',
+        occurredAt: DateTime(2026, 10, 3),
+      );
+      await store.addEntry(
+        kind: EntryKind.expense,
+        amountPaise: 80000,
+        category: 'Transport',
+        title: 'Metro',
+        occurredAt: DateTime(2026, 10, 14),
+      );
+
+      final entry = await store.addEntry(
+        kind: EntryKind.expense,
+        amountPaise: 100000,
+        category: 'Shopping',
+        title: 'Mall',
+        occurredAt: DateTime(2026, 10, 15),
+      );
+
+      // Shopping budget gets the spend.
+      final before = budgetStatus(
+          const SpendingBudget(category: 'Shopping', limitPaise: 200000),
+          store.entries,
+          DateTime(2026, 10, 20));
+      expect(before.spentPaise, 100000);
+
+      // Move to Food: Food utilization rises, Shopping drops, total unchanged.
+      await store.updateEntry(entry.copyWith(category: 'Food'));
+      final afterFood = budgetStatus(
+          const SpendingBudget(category: 'Food', limitPaise: 500000),
+          store.entries,
+          DateTime(2026, 10, 20));
+      expect(afterFood.spentPaise, 420000,
+          reason: '320000 existing + 100000 moved from Shopping');
+      final afterShopping = budgetStatus(
+          const SpendingBudget(category: 'Shopping', limitPaise: 200000),
+          store.entries,
+          DateTime(2026, 10, 20));
+      expect(afterShopping.spentPaise, 0,
+          reason: 'Shopping no longer has the expense');
+
+      // Overall summary unaffected.
+      final summary = summarize(store.entries, monthRange(DateTime(2026, 10, 20)));
+      expect(summary.expenses, 500000,
+          reason: 'total spending unchanged by recategorization');
+    });
+  });
+
+  group('no-spend challenge excludes non-everyday spending (INT-033)', () {
+    test('transfers, bills and recurring are not everyday spending', () {
+      final now = DateTime(2026, 11, 10, 12);
+      final entries = [
+        LedgerEntry(
+          id: 'coffee',
+          kind: EntryKind.expense,
+          amountPaise: 5000,
+          category: 'Food',
+          title: 'Coffee',
+          occurredAt: DateTime(2026, 11, 2),
+        ),
+        LedgerEntry(
+          id: 'transfer',
+          kind: EntryKind.expense,
+          amountPaise: 50000,
+          category: 'Transfers',
+          title: 'To savings',
+          occurredAt: DateTime(2026, 11, 3),
+          classification: TransactionClassification.transfer,
+        ),
+        LedgerEntry(
+          id: 'rent',
+          kind: EntryKind.expense,
+          amountPaise: 150000,
+          category: 'Bills',
+          title: 'Rent',
+          billId: 'rent-bill',
+          occurredAt: DateTime(2026, 11, 5),
+        ),
+        LedgerEntry(
+          id: 'salary',
+          kind: EntryKind.income,
+          amountPaise: 500000,
+          category: 'Salary',
+          title: 'Salary',
+          occurredAt: DateTime(2026, 11, 1),
+        ),
+      ];
+      final stats = noSpendStats(entries, now);
+      // Only the coffee counts as everyday spending.
+      expect(stats.noSpendDays, 9,
+          reason: '10 days minus 1 day with coffee spending');
     });
   });
 }

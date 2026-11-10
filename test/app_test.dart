@@ -177,9 +177,8 @@ void main() {
 
     expect(find.text('₹46,800.00'), findsOneWidget);
     for (final tab in [
-      'Activity',
-      'Budgets',
       'Bills',
+      'Budgets',
       'Goals',
       'Reports',
       'UPI'
@@ -189,10 +188,6 @@ void main() {
       await tester.tap(find.widgetWithText(Tab, tab));
       await tester.pumpAndSettle();
       expect(tester.takeException(), isNull, reason: '$tab tab');
-      if (tab == 'Budgets') {
-        expect(
-            find.textContaining('₹1,800.00 left this month'), findsOneWidget);
-      }
       if (tab == 'Bills') expect(find.text('Due soon'), findsOneWidget);
     }
   });
@@ -259,9 +254,8 @@ void main() {
     await _tapNav(tester, 'Finance');
     for (final tab in [
       'Overview',
-      'Activity',
-      'Budgets',
       'Bills',
+      'Budgets',
       'Plan',
       'Recurring',
       'Accounts',

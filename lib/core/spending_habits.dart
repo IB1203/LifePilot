@@ -7,12 +7,14 @@ import 'models.dart';
 DateTime _day(DateTime value) => DateTime(value.year, value.month, value.day);
 
 /// Everyday spending: expenses other than bills, recurring payments and
-/// loan instalments, which a no-spend day does not count against.
+/// loan instalments, internal transfers, which a no-spend day does not count
+/// against.
 bool isEverydaySpend(LedgerEntry entry) =>
     entry.kind == EntryKind.expense &&
     entry.billId == null &&
     entry.source != 'recurring' &&
-    entry.category != 'Loans';
+    entry.category != 'Loans' &&
+    !isInternalMovement(entry);
 
 /// Spending per day of [month] (all expenses), and a 0–4 intensity for each
 /// day relative to the month's own spending days (quartiles), so the

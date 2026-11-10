@@ -229,6 +229,26 @@ void main() {
               now: _now),
           isNull);
     });
+
+    test('safe to spend can start from the balance and set aside EMIs', () {
+      final safe = safeToSpend(
+        entries: [_spend(5000, DateTime(2026, 11, 2))],
+        budgets: const [],
+        bills: [_bill('Internet', 1000, DateTime(2026, 11, 20))],
+        rules: const [],
+        now: _now,
+        availablePaise: 5000000,
+        monthlyEmiPaise: 1000000,
+      )!;
+      expect(safe.fundsLabel, 'Available balance');
+      expect(safe.fundsPaise, 5000000);
+      expect(safe.committedPaise, 100000);
+      expect(safe.emiPaise, 1000000);
+      expect(safe.remainingPaise, 5000000 - 100000 - 1000000);
+      expect(safe.perDayPaise, (5000000 - 1100000) ~/ 21);
+      expect(safe.spentPaise, 0,
+          reason: 'the available balance already reflects past spending');
+    });
   });
 
   test('categories compared with the same days last month', () {

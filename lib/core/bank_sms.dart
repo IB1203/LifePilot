@@ -254,6 +254,146 @@ final _credit = RegExp(
     r'credit of(?! card)|has (?:a )?credit\b(?! card))',
     caseSensitive: false);
 
+/// Ordered patterns for one bank's sender ID. Banks word their messages in
+/// stable ways, so one sender's template is more reliable than loose
+/// keywords shared by every bank. A template only decides direction and
+/// (optionally) the amount; the rest of the parse stays generic.
+class SenderTemplate {
+  const SenderTemplate({
+    required this.header,
+    this.debitPatterns = const [],
+    this.creditPatterns = const [],
+    this.amountPattern,
+  });
+
+  final String header;
+  final List<RegExp> debitPatterns;
+  final List<RegExp> creditPatterns;
+
+  /// First capture group is the amount in rupees.
+  final RegExp? amountPattern;
+
+  EntryKind? direction(String balanceStripped) {
+    Match? earliest(List<RegExp> patterns) {
+      Match? best;
+      for (final pattern in patterns) {
+        final match = pattern.firstMatch(balanceStripped);
+        if (match == null) continue;
+        if (best == null || match.start < best.start) best = match;
+      }
+      return best;
+    }
+
+    final debit = earliest(debitPatterns);
+    final credit = earliest(creditPatterns);
+    if (debit == null && credit == null) return null;
+    if (debit == null) return EntryKind.income;
+    if (credit == null) return EntryKind.expense;
+    return debit.start < credit.start ? EntryKind.expense : EntryKind.income;
+  }
+}
+
+RegExp _p(String source) => RegExp(source, caseSensitive: false);
+
+/// Templates for the sender IDs whose wording has proven ambiguous. Unknown
+/// senders and formats fall back to the shared patterns below.
+final senderTemplates = <String, SenderTemplate>{
+  'HDFCBK': SenderTemplate(
+    header: 'HDFCBK',
+    debitPatterns: [
+      _p(r'\bsent\s+rs\.?'),
+      _p(r'\bspent\s+on\b'),
+      _p(r'\bdebited\b'),
+      _p(r'\bwithdrawn\b'),
+    ],
+    creditPatterns: [
+      _p(r'\bmoney\s+received\b'),
+      _p(r'\bcredited\b'),
+      _p(r'\bdeposited\b'),
+    ],
+    amountPattern: _p(r'\b(?:rs\.?|inr|₹)\s*([\d,]+(?:\.\d{1,2})?)'),
+  ),
+  'HDFCBN': SenderTemplate(
+    header: 'HDFCBN',
+    debitPatterns: [_p(r'\bdebited\b'), _p(r'\bspent\b')],
+    creditPatterns: [_p(r'\bcredited\b'), _p(r'\breceived\b')],
+  ),
+  'SBIINB': SenderTemplate(
+    header: 'SBIINB',
+    debitPatterns: [_p(r'\bdebited\s+by\b'), _p(r'\bdebit\s+of\b')],
+    creditPatterns: [_p(r'\bcredited\s+by\b'), _p(r'\bcredit\s+of\b')],
+  ),
+  'SBIUPI': SenderTemplate(
+    header: 'SBIUPI',
+    debitPatterns: [_p(r'\bdebited\s+by\b'), _p(r'\bdebited\b')],
+    creditPatterns: [_p(r'\bcredited\b'), _p(r'\breceived\b')],
+  ),
+  'ICICIB': SenderTemplate(
+    header: 'ICICIB',
+    debitPatterns: [_p(r'\bdebited\s+for\b'), _p(r'\bdebited\b')],
+    creditPatterns: [_p(r'\bcredited\b'), _p(r'\bdeposited\b')],
+  ),
+  'AXISBK': SenderTemplate(
+    header: 'AXISBK',
+    debitPatterns: [_p(r'\bdebited\b'), _p(r'\bspent\b')],
+    creditPatterns: [_p(r'\bcredited\b'), _p(r'\breceived\b')],
+  ),
+  'KOTAKB': SenderTemplate(
+    header: 'KOTAKB',
+    debitPatterns: [_p(r'\bsent\s+rs\.?'), _p(r'\bdebited\b')],
+    creditPatterns: [_p(r'\breceived\b'), _p(r'\bcredited\b')],
+  ),
+  'IDFCFB': SenderTemplate(
+    header: 'IDFCFB',
+    debitPatterns: [_p(r'\bdebited\b'), _p(r'\bspent\b')],
+    creditPatterns: [_p(r'\bcredited\b'), _p(r'\breceived\b')],
+  ),
+  'BOBTXN': SenderTemplate(
+    header: 'BOBTXN',
+    debitPatterns: [_p(r'\bdr\.?\b'), _p(r'\bdebited\b')],
+    creditPatterns: [_p(r'\bcr\.?\b'), _p(r'\bcredited\b')],
+  ),
+  'CANBNK': SenderTemplate(
+    header: 'CANBNK',
+    debitPatterns: [_p(r'\bdebited\b')],
+    creditPatterns: [_p(r'\bcredited\b')],
+  ),
+};
+
+/// The template for [header], if one exists.
+SenderTemplate? senderTemplateFor(String? header) => header == null
+    ? null
+    : senderTemplates[header.trim().toUpperCase()];
+
+/// Promotional and service messages that must never become a transaction.
+final _promo = RegExp(
+  r'\b(offer|cashback|discount|sale|deal|coupon|reward points?|redeem|'
+  r'unsubscribe|t&c|terms and conditions|limited period|'
+  r'pre-?approved|loan offer|credit limit increase|upgrade your|'
+  r'set up|registration|registered|activated|has been set|will be set|'
+  r'autopay|e-?mandate|standing instruction|due on|minimum due|statement for|'
+  r'monthly statement|e-?statement)\b',
+  caseSensitive: false,
+);
+
+/// OTPs, requests, failures and promotional messages: never a completed
+/// transaction and not worth putting on the review list either.
+bool ignorableSms(String body) =>
+    _ignoreSms.hasMatch(body) || _promo.hasMatch(body);
+
+/// Whether an unread message still looks like a real transaction that the
+/// parser could not handle. Used to build the "Needs review" list.
+bool looksLikeTransactionSms(String body, SmsSender sender) {
+  if (sender.kind == SenderKind.phoneNumber) return false;
+  if (ignorableSms(body)) return false;
+  final text = body.replaceAll(RegExp(r'\s+'), ' ');
+  final hasMoney = _amountTag.hasMatch(text) ||
+      RegExp(r'\b(?:rs\.?|inr|₹)\s*[\d,]+', caseSensitive: false)
+          .hasMatch(text);
+  final hasVerb = _debit.hasMatch(text) || _credit.hasMatch(text);
+  return hasMoney && (hasVerb || smsBalance(text) != null);
+}
+
 /// "credited to VPA x@y" / "credited to beneficiary": the payee's side of a
 /// payment the user made. "credited to your a/c", "to A/c XX1234" and
 /// "to Axis Bank A/c XX1234" (an account named within a few words) are the
@@ -453,7 +593,8 @@ String? smsAccountHint(String text) => RegExp(
 /// Reads a bank or UPI transaction SMS. Returns null for messages that are
 /// not completed transactions (OTPs, reminders, requests, offers, failures).
 /// [received] lets the date in the message be checked for plausibility.
-ParsedSms? parseBankSms(String body, {DateTime? received}) {
+ParsedSms? parseBankSms(String body,
+    {DateTime? received, String? senderHeader}) {
   final text = body.replaceAll(RegExp(r'\s+'), ' ').trim();
   if (_ignoreSms.hasMatch(text)) return null;
   final autoPay = _autoPay.hasMatch(text);
@@ -466,7 +607,9 @@ ParsedSms? parseBankSms(String body, {DateTime? received}) {
   }
   final amount = _transactionAmount(text);
   if (amount == null || amount <= 0) return null;
-  final kind = smsDirection(text);
+  final plain = text.replaceAll(_balancePattern, ' ');
+  final kind = senderTemplateFor(senderHeader)?.direction(plain) ??
+      smsDirection(text);
   if (kind == null) return null;
   final counterparty = _counterparty(text, kind);
   final account = smsAccountHint(text);

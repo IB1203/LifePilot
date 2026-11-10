@@ -95,11 +95,14 @@ class _CashFlowSection extends StatelessWidget {
                   color: colors.chart.first,
                 ),
                 const SizedBox(height: 10),
-                Text(
-                  forecast.startKnown
-                      ? 'Lowest: ${formatMoney(forecast.lowestPaise)} on ${formatDate(forecast.lowestDay)} · in 60 days: ${formatMoney(forecast.endPaise)}'
-                      : 'Change from today: lowest ${formatMoney(forecast.lowestPaise)} on ${formatDate(forecast.lowestDay)}',
-                  style: theme.textTheme.bodyMedium,
+                InkWell(
+                  onTap: () => showForecastBreakdown(context, forecast, start?.basis),
+                  child: Text(
+                    forecast.startKnown
+                        ? 'Lowest: ${formatMoney(forecast.lowestPaise)} on ${formatDate(forecast.lowestDay)} · in 60 days: ${formatMoney(forecast.endPaise)} · details'
+                        : 'Change from today: lowest ${formatMoney(forecast.lowestPaise)} on ${formatDate(forecast.lowestDay)} · details',
+                    style: theme.textTheme.bodyMedium,
+                  ),
                 ),
                 const SizedBox(height: 4),
                 Text(
@@ -506,3 +509,85 @@ class _SubscriptionsSection extends StatelessWidget {
     );
   }
 }
+
+/// Shows how the cash-flow forecast is built up, so its lowest point and
+/// closing balance can be checked against the figures that produced them.
+Future<void> showForecastBreakdown(
+        BuildContext context, CashForecast forecast, String? startBasis) =>
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (sheetContext) {
+        final theme = Theme.of(sheetContext);
+        final rows = <(String, int)>[
+          (
+            forecast.startKnown
+                ? 'Confirmed starting balance'
+                : 'Starting balance (unknown)',
+            forecast.startPaise,
+          ),
+          ('Expected recurring income', forecast.scheduledIncomePaise),
+          ('Bills and recurring payments', -forecast.scheduledExpensePaise),
+          ('Usual day-to-day spending', -forecast.estimatedSpendPaise),
+        ];
+        return SafeArea(
+          child: ListView(
+            shrinkWrap: true,
+            padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+            children: [
+              Text('How this forecast is built',
+                  style: theme.textTheme.titleLarge),
+              const SizedBox(height: 4),
+              Text(
+                'Day by day over ${forecast.days.length} days. $startBasis'.trim(),
+                style: theme.textTheme.bodySmall,
+              ),
+              const SizedBox(height: 12),
+              for (final (label, amount) in rows)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: Row(
+                    children: [
+                      Expanded(child: Text(label)),
+                      Text(
+                        amount < 0
+                            ? '− ${formatMoney(-amount)}'
+                            : formatMoney(amount),
+                        style: theme.textTheme.titleSmall,
+                      ),
+                    ],
+                  ),
+                ),
+              const Divider(),
+              Row(
+                children: [
+                  Expanded(child: Text('Lowest projected balance',
+                      style: theme.textTheme.titleSmall)),
+                  Text('${formatMoney(forecast.lowestPaise)} · ${formatDate(forecast.lowestDay)}',
+                      style: theme.textTheme.titleSmall
+                          ?.copyWith(fontWeight: FontWeight.w700)),
+                ],
+              ),
+              Row(
+                children: [
+                  Expanded(child: Text('Projected closing balance',
+                      style: theme.textTheme.titleSmall)),
+                  Text(formatMoney(forecast.endPaise),
+                      style: theme.textTheme.titleSmall
+                          ?.copyWith(fontWeight: FontWeight.w700)),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Day-to-day spending is estimated from your last 30 days of '
+                'everyday spending (${formatMoney(forecast.dailySpendPaise)} a day), '
+                'apart from bills and recurring payments, which are placed on their dates.',
+                style: theme.textTheme.bodySmall
+                    ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+              ),
+            ],
+          ),
+        );
+      },
+    );

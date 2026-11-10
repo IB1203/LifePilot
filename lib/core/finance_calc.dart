@@ -41,6 +41,12 @@ DateRange budgetRange(BudgetPeriod period, DateTime now, {int offset = 0}) =>
         ? weekRange(now, offset: offset)
         : monthRange(now, offset: offset);
 
+/// True when an entry only moves money between the user's own pockets, such
+/// as an account-to-account or credit-card-bill transfer. It is never income
+/// or an expense, so it must not reach cash-flow, budget or report totals.
+bool isInternalMovement(LedgerEntry entry) =>
+    entry.classification == TransactionClassification.transfer;
+
 int sumEntries(
   Iterable<LedgerEntry> entries, {
   EntryKind? kind,
@@ -49,6 +55,7 @@ int sumEntries(
 }) {
   var total = 0;
   for (final entry in entries) {
+    if (isInternalMovement(entry)) continue;
     if (kind != null && entry.kind != kind) continue;
     if (range != null && !range.contains(entry.occurredAt)) continue;
     if (category != null && entry.category != category) continue;
@@ -58,13 +65,36 @@ int sumEntries(
 }
 
 class PeriodSummary {
-  const PeriodSummary({required this.income, required this.expenses});
+  const PeriodSummary({
+    required this.income,
+    required this.expenses,
+    this.investments = 0,
+    this.refunds = 0,
+    this.internalTransfers = 0,
+    this.moneyReceived = 0,
+    this.moneySent = 0,
+    this.openingBalance = 0,
+    this.closingBalance = 0,
+  });
 
   final int income;
   final int expenses;
+  final int investments;
+  final int refunds;
+  final int internalTransfers;
+  final int moneyReceived;
+  final int moneySent;
+  final int openingBalance;
+  final int closingBalance;
 
-  /// Recorded income minus recorded expenses. This is not net worth.
+  /// Recorded income minus recorded expenses, excluding transfers and investments.
   int get netCashFlow => income - expenses;
+
+  /// Total money flowing in (income + received money + refunds).
+  int get totalIn => income + moneyReceived + refunds;
+
+  /// Total money flowing out (expenses + sent money + investments).
+  int get totalOut => expenses + moneySent + investments;
 }
 
 PeriodSummary summarize(Iterable<LedgerEntry> entries, DateRange range) =>
@@ -73,6 +103,98 @@ PeriodSummary summarize(Iterable<LedgerEntry> entries, DateRange range) =>
       expenses: sumEntries(entries, kind: EntryKind.expense, range: range),
     );
 
+/// Smart summary that classifies entries by [TransactionClassification] so
+/// that transfers, investments, and refunds are not confused with regular
+/// income or expenses.
+SmartSummary smartSummarize(Iterable<LedgerEntry> entries, DateRange range) {
+  var income = 0;
+  var expenses = 0;
+  var investments = 0;
+  var refunds = 0;
+  var internalTransfers = 0;
+  var moneyReceived = 0;
+  var moneySent = 0;
+
+  for (final entry in entries) {
+    if (!range.contains(entry.occurredAt)) continue;
+
+    switch (entry.classification) {
+      case TransactionClassification.income:
+        income += entry.amountPaise;
+      case TransactionClassification.expense:
+        expenses += entry.amountPaise;
+      case TransactionClassification.investment:
+        investments += entry.amountPaise;
+      case TransactionClassification.refund:
+        refunds += entry.amountPaise;
+      case TransactionClassification.transfer:
+        internalTransfers += entry.amountPaise;
+      case TransactionClassification.receivedMoney:
+        moneyReceived += entry.amountPaise;
+      case TransactionClassification.cashWithdrawal:
+        moneySent += entry.amountPaise;
+      case TransactionClassification.bills:
+        expenses += entry.amountPaise;
+      case TransactionClassification.shopping:
+        expenses += entry.amountPaise;
+      case TransactionClassification.food:
+        expenses += entry.amountPaise;
+      case TransactionClassification.debtPayment:
+        expenses += entry.amountPaise;
+      case TransactionClassification.loanReceived:
+        moneyReceived += entry.amountPaise;
+      case TransactionClassification.other:
+        // Default by direction.
+        if (entry.kind == EntryKind.income) {
+          income += entry.amountPaise;
+        } else {
+          expenses += entry.amountPaise;
+        }
+    }
+  }
+
+  return SmartSummary(
+    income: income,
+    expenses: expenses,
+    investments: investments,
+    refunds: refunds,
+    internalTransfers: internalTransfers,
+    moneyReceived: moneyReceived,
+    moneySent: moneySent,
+    openingBalance: 0,
+    closingBalance: 0,
+  );
+}
+
+/// Smart summary with classification-aware totals.
+class SmartSummary {
+  const SmartSummary({
+    required this.income,
+    required this.expenses,
+    required this.investments,
+    required this.refunds,
+    required this.internalTransfers,
+    required this.moneyReceived,
+    required this.moneySent,
+    required this.openingBalance,
+    required this.closingBalance,
+  });
+
+  final int income;
+  final int expenses;
+  final int investments;
+  final int refunds;
+  final int internalTransfers;
+  final int moneyReceived;
+  final int moneySent;
+  final int openingBalance;
+  final int closingBalance;
+
+  int get netCashFlow => income - expenses;
+  int get totalIn => income + moneyReceived + refunds;
+  int get totalOut => expenses + moneySent + investments;
+}
+
 Map<String, int> categoryTotals(
   Iterable<LedgerEntry> entries,
   DateRange range, {
@@ -80,6 +202,7 @@ Map<String, int> categoryTotals(
 }) {
   final totals = <String, int>{};
   for (final entry in entries) {
+    if (isInternalMovement(entry)) continue;
     if (entry.kind != kind || !range.contains(entry.occurredAt)) continue;
     totals.update(entry.category, (value) => value + entry.amountPaise,
         ifAbsent: () => entry.amountPaise);
@@ -297,6 +420,82 @@ List<LedgerEntry> findPossibleDuplicates(
         (candidate.merchant.isNotEmpty &&
             normal(entry.merchant) == normal(candidate.merchant));
   }).toList();
+}
+
+/// Entries that describe the same transaction, from SMS, a statement or a
+/// manual entry. Amount, kind and date must match, and either a reference
+/// (UTR/UPI/RRN) or the title/merchant must agree, so two equal payments are
+/// not merged just because they share an amount.
+class DuplicateGroup {
+  const DuplicateGroup(this.entries);
+
+  final List<LedgerEntry> entries;
+
+  LedgerEntry get keep => entries.first;
+
+  Iterable<String> get duplicateIds => entries.skip(1).map((e) => e.id);
+
+  int get totalPaise =>
+      entries.fold(0, (sum, entry) => sum + entry.amountPaise);
+}
+
+final _referencePattern =
+    RegExp(r'\b(?:ref(?:erence)?|utr|rrn|upi\s*ref|txn|transaction)\D{0,8}([A-Za-z0-9]{6,24})',
+        caseSensitive: false);
+
+String? _referenceOf(LedgerEntry entry) =>
+    _referencePattern.firstMatch('${entry.note} ${entry.title}')?.group(1);
+
+String _plain(String value) =>
+    value.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]+'), ' ').trim();
+
+List<DuplicateGroup> findDuplicateGroups(
+  Iterable<LedgerEntry> entries, {
+  Duration window = const Duration(days: 3),
+}) {
+  final list = entries.toList();
+  // Only entries with the same kind and amount can be duplicates, so compare
+  // inside those buckets instead of every pair in the ledger.
+  final buckets = <String, List<int>>{};
+  for (var i = 0; i < list.length; i++) {
+    final key = '${list[i].kind.name}|${list[i].amountPaise}';
+    buckets.putIfAbsent(key, () => []).add(i);
+  }
+  final used = <int>{};
+  final groups = <DuplicateGroup>[];
+  for (var i = 0; i < list.length; i++) {
+    if (used.contains(i)) continue;
+    final first = list[i];
+    final candidates =
+        buckets['${first.kind.name}|${first.amountPaise}'] ?? const <int>[];
+    final members = <LedgerEntry>[first];
+    for (final j in candidates) {
+      if (j <= i || used.contains(j)) continue;
+      final other = list[j];
+      if (other.occurredAt.difference(first.occurredAt).abs() > window) {
+        continue;
+      }
+      final firstRef = _referenceOf(first);
+      final otherRef = _referenceOf(other);
+      final sameReference = firstRef != null && firstRef == otherRef;
+      final firstText = _plain('${first.title} ${first.merchant}');
+      final otherText = _plain('${other.title} ${other.merchant}');
+      final sameWords = firstText.isNotEmpty &&
+          otherText.isNotEmpty &&
+          (firstText == otherText ||
+              firstText.contains(otherText) ||
+              otherText.contains(firstText));
+      if (!sameReference && !sameWords) continue;
+      members.add(other);
+      used.add(j);
+    }
+    if (members.length > 1) {
+      members.sort((a, b) => a.occurredAt.compareTo(b.occurredAt));
+      groups.add(DuplicateGroup(members));
+      used.add(i);
+    }
+  }
+  return groups;
 }
 
 /// Bills ordered by next due date, excluding inactive ones.

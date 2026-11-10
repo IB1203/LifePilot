@@ -42,10 +42,9 @@ class FinancePage extends StatelessWidget {
                 tabAlignment: TabAlignment.start,
                 tabs: [
                   Tab(text: 'Overview'),
-                  Tab(text: 'Activity'),
-                  Tab(text: 'Budgets'),
                   Tab(text: 'Bills'),
                   Tab(text: 'Plan'),
+                  Tab(text: 'Budgets'),
                   Tab(text: 'Recurring'),
                   Tab(text: 'Accounts'),
                   Tab(text: 'Debts'),
@@ -53,6 +52,7 @@ class FinancePage extends StatelessWidget {
                   Tab(text: 'Goals'),
                   Tab(text: 'Reports'),
                   Tab(text: 'UPI'),
+                  Tab(text: 'Review'),
                 ],
               ),
             ),
@@ -60,10 +60,9 @@ class FinancePage extends StatelessWidget {
               child: TabBarView(
                 children: [
                   _OverviewTab(store: store),
-                  _ActivityTab(store: store),
-                  _BudgetsTab(store: store),
                   _BillsTab(store: store),
                   PlanTab(store: store),
+                  _BudgetsTab(store: store),
                   RecurringTab(store: store),
                   AccountsTab(store: store),
                   DebtsTab(store: store),
@@ -71,6 +70,7 @@ class FinancePage extends StatelessWidget {
                   _GoalsTab(store: store),
                   _ReportsTab(store: store),
                   UpiTab(store: store),
+                  PendingReviewPage(store: store),
                 ],
               ),
             ),
@@ -139,7 +139,7 @@ class _OverviewTab extends StatelessWidget {
                     '${store.pending.length} ${store.pending.length == 1 ? 'draft is' : 'drafts are'} waiting for review'),
                 subtitle: const Text('Recurring entries and SMS transactions'),
                 trailing: const Icon(Icons.chevron_right),
-                onTap: () => DefaultTabController.of(context).animateTo(5),
+                onTap: () => DefaultTabController.of(context).animateTo(4),
               ),
             ),
           ),
@@ -172,6 +172,8 @@ class _OverviewTab extends StatelessWidget {
           icon: Icons.swap_vert,
           caption: 'Recorded income − recorded expenses. Not net worth.',
         ),
+        const SizedBox(height: 10),
+        _SmartSummaryCard(store: store, now: now),
         if (budgets.limitPaise > 0) ...[
           const SizedBox(height: 10),
           Card(
@@ -287,6 +289,185 @@ class _OverviewTab extends StatelessWidget {
               child: InsightCard(insight: insight),
             ),
         ],
+        const SectionHeader(title: 'Recent transactions'),
+        _RecentTransactionsList(store: store),
+      ],
+    );
+  }
+}
+
+/// Smart summary card showing classification-aware totals (investments,
+/// refunds, transfers, money received/sent) alongside income and expenses.
+class _SmartSummaryCard extends StatelessWidget {
+  const _SmartSummaryCard({required this.store, required this.now});
+
+  final LifePilotStore store;
+  final DateTime now;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = AppColors.of(context);
+    final summary = smartSummarize(
+      store.entries,
+      monthRange(now),
+    );
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Smart summary', style: Theme.of(context).textTheme.titleSmall),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: _StatBox(
+                    label: 'Income',
+                    value: formatMoney(summary.income),
+                    color: colors.income,
+                  ),
+                ),
+                Expanded(
+                  child: _StatBox(
+                    label: 'Expenses',
+                    value: formatMoney(summary.expenses),
+                    color: colors.expense,
+                  ),
+                ),
+                Expanded(
+                  child: _StatBox(
+                    label: 'Investments',
+                    value: formatMoney(summary.investments),
+                    color: colors.chart[2],
+                  ),
+                ),
+                Expanded(
+                  child: _StatBox(
+                    label: 'Refunds',
+                    value: formatMoney(summary.refunds),
+                    color: colors.income,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: _StatBox(
+                    label: 'Internal transfers',
+                    value: formatMoney(summary.internalTransfers),
+                    color: colors.chart[1],
+                  ),
+                ),
+                Expanded(
+                  child: _StatBox(
+                    label: 'Money received',
+                    value: formatMoney(summary.moneyReceived),
+                    color: colors.income,
+                  ),
+                ),
+                Expanded(
+                  child: _StatBox(
+                    label: 'Money sent',
+                    value: formatMoney(summary.moneySent),
+                    color: colors.expense,
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _StatBox extends StatelessWidget {
+  const _StatBox({
+    required this.label,
+    required this.value,
+    required this.color,
+  });
+
+  final String label;
+  final String value;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: Theme.of(context).textTheme.labelSmall?.copyWith(
+            color: Theme.of(context).colorScheme.onSurfaceVariant,
+          ),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          value,
+          style: Theme.of(context).textTheme.titleMedium?.copyWith(
+            fontWeight: FontWeight.w600,
+            color: color,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Recent transactions list merged from Activity tab into Overview.
+class _RecentTransactionsList extends StatelessWidget {
+  const _RecentTransactionsList({required this.store});
+
+  final LifePilotStore store;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = AppColors.of(context);
+    final recentList = store.entries.toList();
+    recentList.sort((a, b) => b.occurredAt.compareTo(a.occurredAt));
+    final recent = recentList.take(8);
+    if (recent.isEmpty) {
+      return const EmptyState(
+        compact: true,
+        icon: Icons.receipt_long_outlined,
+        title: 'No transactions yet',
+        message: 'Your recorded entries will appear here.',
+      );
+    }
+    return CardList(
+      children: [
+        for (final entry in recent)
+          ListTile(
+            dense: true,
+            leading: CircleAvatar(
+              backgroundColor: entry.isIncome
+                  ? colors.income.withValues(alpha: 0.15)
+                  : colors.expense.withValues(alpha: 0.15),
+              child: Icon(
+                entry.isIncome ? Icons.south_west : Icons.north_east,
+                size: 20,
+                color: entry.isIncome ? colors.income : colors.expense,
+              ),
+            ),
+            title: Text(entry.title,
+                maxLines: 1, overflow: TextOverflow.ellipsis),
+            subtitle: Text(
+              '${entry.category} · ${formatDate(entry.occurredAt)}',
+              maxLines: 1, overflow: TextOverflow.ellipsis,
+            ),
+            trailing: Text(
+              '${entry.isIncome ? '+' : '-'}${formatMoney(entry.amountPaise)}',
+              style: TextStyle(
+                color: entry.isIncome ? colors.income : colors.expense,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
       ],
     );
   }
@@ -368,6 +549,7 @@ class _ActivityTabState extends State<_ActivityTab> {
     final groupByDay = _sort == _Sort.newest || _sort == _Sort.oldest;
     final usedCategories =
         {for (final entry in store.entries) entry.category}.toList()..sort();
+    final duplicateGroups = findDuplicateGroups(store.entries);
 
     return ListView(
       padding: pagePadding,
@@ -468,18 +650,27 @@ class _ActivityTabState extends State<_ActivityTab> {
             PopupMenuButton<String>(
               tooltip: 'Import or export',
               icon: const Icon(Icons.import_export),
-              onSelected: (value) => value == 'export'
-                  ? _export(context, entries)
-                  : _import(context),
+              onSelected: (value) => switch (value) {
+                'export' => _export(context, entries),
+                'import' => _import(context),
+                _ => _bulkEdit(context),
+              },
               itemBuilder: (_) => const [
                 PopupMenuItem(
                     value: 'export',
                     child: Text('Export shown entries as CSV')),
                 PopupMenuItem(value: 'import', child: Text('Import CSV…')),
+                PopupMenuItem(
+                    value: 'bulk', child: Text('Fix many entries…')),
               ],
             ),
           ],
         ),
+        if (duplicateGroups.isNotEmpty) ...[
+          const SizedBox(height: 6),
+          DuplicateEntriesBanner(
+              store: store, groups: duplicateGroups, now: now),
+        ],
         const SizedBox(height: 6),
         if (entries.isEmpty)
           EmptyState(
@@ -572,11 +763,18 @@ class _ActivityTabState extends State<_ActivityTab> {
             paymentMethod: entry.paymentMethod,
             note: entry.note,
             merchant: entry.merchant,
+            subcategory: entry.subcategory,
             billId: entry.billId,
+            accountId: entry.accountId,
+            receiptPath: entry.receiptPath,
+            source: entry.source,
           ),
         ),
       ));
   }
+
+  Future<void> _bulkEdit(BuildContext context) =>
+      showBulkEditSheet(context, widget.store);
 
   Future<void> _export(BuildContext context, List<LedgerEntry> entries) async {
     if (entries.isEmpty) {
@@ -1520,6 +1718,375 @@ class _ReportsTabState extends State<_ReportsTab> {
         Text('Reports describe recorded cash flow, not net worth.',
             style: Theme.of(context).textTheme.bodySmall),
       ],
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Duplicates and bulk corrections
+
+class DuplicateEntriesBanner extends StatelessWidget {
+  const DuplicateEntriesBanner({
+    required this.store,
+    required this.groups,
+    required this.now,
+    super.key,
+  });
+
+  final LifePilotStore store;
+  final List<DuplicateGroup> groups;
+  final DateTime now;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Card(
+      color: scheme.tertiaryContainer,
+      child: ListTile(
+        leading: Icon(Icons.copy_all_outlined, color: scheme.onTertiaryContainer),
+        title: Text(
+          '${groups.length} possible duplicate${groups.length == 1 ? '' : 's'}',
+          style: TextStyle(color: scheme.onTertiaryContainer),
+        ),
+        subtitle: Text(
+          'The same transaction may have come in twice, from SMS and a statement or by hand.',
+          style: TextStyle(color: scheme.onTertiaryContainer),
+        ),
+        trailing: FilledButton.tonal(
+          onPressed: () => showDialog<void>(
+            context: context,
+            builder: (_) =>
+                _DuplicateReviewDialog(store: store, groups: groups, now: now),
+          ),
+          child: const Text('Review'),
+        ),
+      ),
+    );
+  }
+}
+
+class _DuplicateReviewDialog extends StatefulWidget {
+  const _DuplicateReviewDialog({
+    required this.store,
+    required this.groups,
+    required this.now,
+  });
+
+  final LifePilotStore store;
+  final List<DuplicateGroup> groups;
+  final DateTime now;
+
+  @override
+  State<_DuplicateReviewDialog> createState() => _DuplicateReviewDialogState();
+}
+
+class _DuplicateReviewDialogState extends State<_DuplicateReviewDialog> {
+  late final List<DuplicateGroup> groups;
+  final keepByGroup = <int, String>{};
+
+  @override
+  void initState() {
+    super.initState();
+    groups = [...widget.groups];
+  }
+
+  String _keepFor(int index) =>
+      keepByGroup[index] ?? groups[index].entries.first.id;
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Possible duplicates'),
+      content: SizedBox(
+        width: 440,
+        child: groups.isEmpty
+            ? const Text('No duplicates left.')
+            : ListView.builder(
+                shrinkWrap: true,
+                itemCount: groups.length,
+                itemBuilder: (context, index) {
+                  final group = groups[index];
+                  final keep = _keepFor(index);
+                  return Card(
+                    margin: const EdgeInsets.only(bottom: 12),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+                          child: Text(
+                            '${formatMoney(group.entries.first.amountPaise)} · ${group.entries.first.isIncome ? 'Income' : 'Expense'}',
+                            style: Theme.of(context).textTheme.titleSmall,
+                          ),
+                        ),
+                        for (final entry in group.entries)
+                          ListTile(
+                            dense: true,
+                            leading: Icon(entry.id == keep
+                                ? Icons.radio_button_checked
+                                : Icons.radio_button_unchecked),
+                            onTap: () => setState(
+                                () => keepByGroup[index] = entry.id),
+                            title: Text(entry.title),
+                            subtitle: Text([
+                              formatDate(entry.occurredAt),
+                              if (entry.source != null && entry.source!.isNotEmpty)
+                                entry.source!,
+                              if (entry.note.isNotEmpty) entry.note,
+                            ].join(' · ')),
+                          ),
+                        Align(
+                          alignment: Alignment.centerRight,
+                          child: Padding(
+                            padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+                            child: FilledButton.tonal(
+                              onPressed: () async {
+                                final merged = await widget.store.mergeEntries(
+                                    keep,
+                                    group.entries
+                                        .where((entry) => entry.id != keep)
+                                        .map((entry) => entry.id));
+                                if (!context.mounted) return;
+                                if (merged == null) {
+                                  showMessage(
+                                      context, 'That entry no longer exists.',
+                                      error: true);
+                                  return;
+                                }
+                                setState(() => groups.removeAt(index));
+                                showMessage(context,
+                                    'Merged ${group.entries.length} entries into “${merged.title}”.');
+                              },
+                              child: Text(
+                                  'Merge ${group.entries.length - 1} duplicate${group.entries.length == 2 ? '' : 's'}'),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+      ),
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Close')),
+      ],
+    );
+  }
+}
+
+Future<void> showBulkEditSheet(
+        BuildContext context, LifePilotStore store) =>
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => _BulkEditSheet(store: store),
+    );
+
+enum _BulkTarget { category, payment, account, kind }
+
+class _BulkEditSheet extends StatefulWidget {
+  const _BulkEditSheet({required this.store});
+
+  final LifePilotStore store;
+
+  @override
+  State<_BulkEditSheet> createState() => _BulkEditSheetState();
+}
+
+class _BulkEditSheetState extends State<_BulkEditSheet> {
+  var _target = _BulkTarget.category;
+  String? _fromCategory;
+  String? _toCategory;
+  String? _fromPayment;
+  String? _toPayment;
+  String? _fromAccount;
+  String? _toAccount;
+  EntryKind _fromKind = EntryKind.expense;
+  EntryKind _toKind = EntryKind.income;
+  String? _error;
+
+  @override
+  Widget build(BuildContext context) {
+    final store = widget.store;
+    final categories =
+        {for (final entry in store.entries) entry.category}.toList()..sort();
+    final payments =
+        {for (final entry in store.entries) entry.paymentMethod}.toList()
+          ..sort();
+    final accounts = store.accounts.where((item) => !item.archived).toList();
+
+    bool matches(LedgerEntry entry) => switch (_target) {
+          _BulkTarget.category =>
+            _fromCategory != null && entry.category == _fromCategory,
+          _BulkTarget.payment =>
+            _fromPayment != null && entry.paymentMethod == _fromPayment,
+          _BulkTarget.account => _fromAccount == null
+              ? entry.accountId == null
+              : entry.accountId == _fromAccount,
+          _BulkTarget.kind => entry.kind == _fromKind,
+        };
+    final count = store.entries.where(matches).length;
+
+    return Padding(
+      padding: EdgeInsets.only(
+          bottom: MediaQuery.viewInsetsOf(context).bottom),
+      child: ListView(
+        shrinkWrap: true,
+        padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
+        children: [
+          Text('Fix many entries',
+              style: Theme.of(context).textTheme.headlineSmall),
+          const Text('Applies to every past entry that matches.'),
+          const SizedBox(height: 12),
+          DropdownButtonFormField<_BulkTarget>(
+            initialValue: _target,
+            decoration: const InputDecoration(labelText: 'Change'),
+            items: const [
+              DropdownMenuItem(
+                  value: _BulkTarget.category, child: Text('Category')),
+              DropdownMenuItem(
+                  value: _BulkTarget.payment, child: Text('Payment method')),
+              DropdownMenuItem(
+                  value: _BulkTarget.account, child: Text('Account')),
+              DropdownMenuItem(
+                  value: _BulkTarget.kind, child: Text('Type (income/expense)')),
+            ],
+            onChanged: (value) => setState(() => _target = value ?? _target),
+          ),
+          const SizedBox(height: 12),
+          if (_target == _BulkTarget.category) ...[
+            DropdownButtonFormField<String?>(
+              initialValue: _fromCategory,
+              decoration: const InputDecoration(labelText: 'From category'),
+              items: [
+                for (final category in categories)
+                  DropdownMenuItem(value: category, child: Text(category)),
+              ],
+              onChanged: (value) => setState(() => _fromCategory = value),
+            ),
+            const SizedBox(height: 8),
+            DropdownButtonFormField<String?>(
+              initialValue: _toCategory,
+              decoration: const InputDecoration(labelText: 'To category'),
+              items: [
+                for (final category in {...categories, 'Other'}.toList()..sort())
+                  DropdownMenuItem(value: category, child: Text(category)),
+              ],
+              onChanged: (value) => setState(() => _toCategory = value),
+            ),
+          ],
+          if (_target == _BulkTarget.payment) ...[
+            DropdownButtonFormField<String?>(
+              initialValue: _fromPayment,
+              decoration: const InputDecoration(labelText: 'From method'),
+              items: [
+                for (final method in payments)
+                  DropdownMenuItem(value: method, child: Text(method)),
+              ],
+              onChanged: (value) => setState(() => _fromPayment = value),
+            ),
+            const SizedBox(height: 8),
+            DropdownButtonFormField<String?>(
+              initialValue: _toPayment,
+              decoration: const InputDecoration(labelText: 'To method'),
+              items: [
+                for (final method in paymentMethods)
+                  DropdownMenuItem(value: method, child: Text(method)),
+              ],
+              onChanged: (value) => setState(() => _toPayment = value),
+            ),
+          ],
+          if (_target == _BulkTarget.account) ...[
+            DropdownButtonFormField<String?>(
+              initialValue: _fromAccount,
+              decoration: const InputDecoration(labelText: 'From account'),
+              items: [
+                const DropdownMenuItem(
+                    value: null, child: Text('No account set')),
+                for (final account in accounts)
+                  DropdownMenuItem(value: account.id, child: Text(account.name)),
+              ],
+              onChanged: (value) => setState(() => _fromAccount = value),
+            ),
+            const SizedBox(height: 8),
+            DropdownButtonFormField<String?>(
+              initialValue: _toAccount,
+              decoration: const InputDecoration(labelText: 'To account'),
+              items: [
+                const DropdownMenuItem(
+                    value: null, child: Text('No account set')),
+                for (final account in accounts)
+                  DropdownMenuItem(value: account.id, child: Text(account.name)),
+              ],
+              onChanged: (value) => setState(() => _toAccount = value),
+            ),
+          ],
+          if (_target == _BulkTarget.kind) ...[
+            DropdownButtonFormField<EntryKind>(
+              initialValue: _fromKind,
+              decoration: const InputDecoration(labelText: 'From type'),
+              items: const [
+                DropdownMenuItem(
+                    value: EntryKind.expense, child: Text('Expense')),
+                DropdownMenuItem(value: EntryKind.income, child: Text('Income')),
+              ],
+              onChanged: (value) => setState(() => _fromKind = value ?? _fromKind),
+            ),
+            const SizedBox(height: 8),
+            DropdownButtonFormField<EntryKind>(
+              initialValue: _toKind,
+              decoration: const InputDecoration(labelText: 'To type'),
+              items: const [
+                DropdownMenuItem(
+                    value: EntryKind.expense, child: Text('Expense')),
+                DropdownMenuItem(value: EntryKind.income, child: Text('Income')),
+              ],
+              onChanged: (value) => setState(() => _toKind = value ?? _toKind),
+            ),
+          ],
+          const SizedBox(height: 12),
+          Text('Matches $count ${count == 1 ? 'entry' : 'entries'}'),
+          if (_error != null)
+            Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+          const SizedBox(height: 8),
+          FilledButton(
+            onPressed: count == 0
+                ? null
+                : () async {
+                    if (_target == _BulkTarget.category &&
+                        _toCategory == null) {
+                      setState(() => _error = 'Choose a new category.');
+                      return;
+                    }
+                    if (_target == _BulkTarget.payment && _toPayment == null) {
+                      setState(() => _error = 'Choose a new method.');
+                      return;
+                    }
+                    final changed = await store.bulkCorrectEntries(
+                      where: matches,
+                      kind: _target == _BulkTarget.kind ? _toKind : null,
+                      category:
+                          _target == _BulkTarget.category ? _toCategory : null,
+                      paymentMethod:
+                          _target == _BulkTarget.payment ? _toPayment : null,
+                      accountId:
+                          _target == _BulkTarget.account ? _toAccount : null,
+                      clearAccount:
+                          _target == _BulkTarget.account && _toAccount == null,
+                    );
+                    if (!context.mounted) return;
+                    Navigator.pop(context);
+                    showMessage(
+                        context,
+                        'Updated $changed ${changed == 1 ? 'entry' : 'entries'}.');
+                  },
+            child: const Text('Apply correction'),
+          ),
+        ],
+      ),
     );
   }
 }

@@ -93,6 +93,34 @@ Implemented and tested (`test/bank_sms_test.dart`, `test/sms_import_test.dart`, 
 - Last-30-days credited/debited totals; monthly in/out of recurring entries; editing a paused rule no longer resumes it; the recurring form no longer uses its text fields after they are disposed (crashed in debug while the sheet closed).
 - Fixed while testing: "Your a/c no. XXXXXX4321 is credited" was read as a payee being credited.
 
+## Integration fixes (delivered 10 November 2026)
+
+Found while reviewing the cross-module integration scenarios; all covered by
+tests, analyzer clean, full suite passing.
+
+- **Bank balances and Accounts agree.** A bank SMS balance for a bank that is
+  not tracked yet now creates (or matches) an account instead of being left as
+  an orphan, so the Accounts total matches the balance Home shows. SMS
+  transactions are linked to the account their balance created or matched, and
+  the Accounts tab can link older unlinked entries to the right account.
+- **Safe to spend is explained, not just shown.** It now starts from the
+  available balance when one is known (which already reflects money spent),
+  sets aside bills still due, monthly EMIs and a buffer, and offers a
+  "How this is calculated" breakdown.
+- **The forecast says what it is built from.** It reports the confirmed
+  starting balance, expected recurring income, scheduled bills and recurring
+  payments, and the estimated day-to-day spending, behind a "details" sheet.
+- **Month-end projection made explicit.** The figure was already
+  "spent so far + daily pace × days left + bills still due"; the card now shows
+  that wording so it cannot be misread as a whole-month average.
+- **Salary plan uses recorded income.** Income recorded only in the current
+  month now produces a plan ("Income recorded this month") instead of
+  "No income yet".
+- **Internal transfers never distort totals.** Entries classified as an
+  internal transfer (for example a credit-card bill payment or an
+  account-to-account move) are excluded from income, expense, category,
+  budget and forecast totals.
+
 ## Phases 4–11 (from the November 2026 feature research)
 
 All delivered on 6 November 2026 in order, each finished before the next: analyzer clean, 270 automated tests passing (`flutter test`), debug APK builds. None of it is verified on a physical device yet; see the device checklist below.

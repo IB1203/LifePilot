@@ -82,11 +82,16 @@ class AccountsTab extends StatelessWidget {
               label: const Text('Move money between accounts'),
             ),
           if (unlinked > 0)
-            Padding(
-              padding: const EdgeInsets.only(top: 8),
-              child: Text(
-                  '$unlinked entries are not linked to an account and are not counted in these balances.',
-                  style: Theme.of(context).textTheme.bodySmall),
+            Card(
+              child: ListTile(
+                leading: Icon(Icons.link_off, color: colors.warning),
+                title: Text(
+                    '$unlinked entr${unlinked == 1 ? 'y' : 'ies'} not linked to an account'),
+                subtitle: const Text(
+                    'They are not counted in these balances. Link each to the right account.'),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => showLinkUnlinkedSheet(context, store),
+              ),
             ),
         ],
         if (recentTransfers.isNotEmpty) ...[
@@ -106,6 +111,12 @@ class AccountsTab extends StatelessWidget {
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       Text(formatMoney(transfer.amountPaise)),
+                      IconButton(
+                        tooltip: 'Edit transfer',
+                        icon: const Icon(Icons.edit_outlined),
+                        onPressed: () => showTransferForm(context, store,
+                            transfer: transfer),
+                      ),
                       IconButton(
                         tooltip: 'Delete transfer',
                         icon: const Icon(Icons.delete_outline),
@@ -140,6 +151,104 @@ class AccountsTab extends StatelessWidget {
   }
 }
 
+/// Lets the user attach entries that are not linked to any account to the
+/// account they actually came from. Linking only changes which balance an
+/// entry counts towards; the income and expense totals stay the same.
+Future<void> showLinkUnlinkedSheet(
+        BuildContext context, LifePilotStore store) =>
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (_) => _LinkUnlinkedSheet(store: store),
+    );
+
+class _LinkUnlinkedSheet extends StatelessWidget {
+  const _LinkUnlinkedSheet({required this.store});
+
+  final LifePilotStore store;
+
+  @override
+  Widget build(BuildContext context) => AnimatedBuilder(
+        animation: store,
+        builder: (context, _) {
+          final entries = store.entries
+              .where((entry) => entry.accountId == null)
+              .toList()
+            ..sort((a, b) => b.occurredAt.compareTo(a.occurredAt));
+          final accounts =
+              store.accounts.where((account) => !account.archived).toList();
+          final theme = Theme.of(context);
+          return SafeArea(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 0, 20, 4),
+                  child: Text('Link entries to an account',
+                      style: theme.textTheme.titleLarge),
+                ),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 20),
+                  child: Text(
+                    'Choose an account for each entry. Linking only changes '
+                    'which account it counts towards; the income and expense '
+                    'totals do not change.',
+                    style: theme.textTheme.bodySmall,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                if (accounts.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.fromLTRB(20, 8, 20, 24),
+                    child:
+                        Text('Add an account first, then link entries to it.'),
+                  )
+                else if (entries.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.fromLTRB(20, 8, 20, 24),
+                    child: Text('Every entry is linked to an account.'),
+                  )
+                else
+                  Flexible(
+                    child: ListView.builder(
+                      shrinkWrap: true,
+                      itemCount:
+                          entries.length > 100 ? 100 : entries.length,
+                      itemBuilder: (context, index) {
+                        final entry = entries[index];
+                        return ListTile(
+                          title: Text(entry.title,
+                              maxLines: 1, overflow: TextOverflow.ellipsis),
+                          subtitle: Text(
+                              '${entry.category} · ${formatDate(entry.occurredAt)} · ${formatMoney(entry.amountPaise)}'),
+                          trailing: PopupMenuButton<String>(
+                            tooltip: 'Link to account',
+                            icon: const Icon(Icons.link),
+                            onSelected: (accountId) =>
+                                store.bulkCorrectEntries(
+                              where: (item) => item.id == entry.id,
+                              accountId: accountId,
+                            ),
+                            itemBuilder: (context) => [
+                              for (final account in accounts)
+                                PopupMenuItem(
+                                    value: account.id,
+                                    child: Text(account.name)),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+              ],
+            ),
+          );
+        },
+      );
+}
+
 IconData accountIcon(AccountKind kind) => switch (kind) {
       AccountKind.cash => Icons.payments_outlined,
       AccountKind.bank => Icons.account_balance_outlined,
@@ -160,6 +269,7 @@ class _AccountTile extends StatelessWidget {
     final balance = store.accountRunningBalance(account.id);
     final count =
         store.entries.where((entry) => entry.accountId == account.id).length;
+    final synced = store.lastSyncedFor(account);
     return ListTile(
       leading: CircleAvatar(
         backgroundColor: Theme.of(context).colorScheme.primaryContainer,
@@ -167,7 +277,17 @@ class _AccountTile extends StatelessWidget {
             color: Theme.of(context).colorScheme.primary),
       ),
       title: Text(account.name),
-      subtitle: Text('${account.kind.label} · $count entries'),
+      subtitle: Text([
+        '${account.kind.label} · $count entries',
+        if (account.bankName != null) account.bankName!,
+        if (account.ifscCode?.isNotEmpty == true)
+          'IFSC: ${account.ifscCode!}',
+        if (account.last4.isNotEmpty) '••${account.last4}',
+        if (synced != null) 'Last synced ${formatDate(synced)}',
+        if (account.verificationStatus != 'unidentified')
+          account.verificationStatus,
+      ].join(' · ')),
+      isThreeLine: synced != null,
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -237,6 +357,7 @@ class _AccountFormSheet extends StatefulWidget {
 class _AccountFormSheetState extends State<_AccountFormSheet> {
   late final TextEditingController name;
   late final TextEditingController opening;
+  late final TextEditingController last4;
   var negative = false;
   var kind = AccountKind.bank;
   final formKey = GlobalKey<FormState>();
@@ -250,6 +371,7 @@ class _AccountFormSheetState extends State<_AccountFormSheet> {
       text: account == null || account.openingBalancePaise == 0
           ? ''
           : paiseToInput(account.openingBalancePaise.abs()));
+    last4 = TextEditingController(text: account?.last4 ?? '');
     negative = (account?.openingBalancePaise ?? 0) < 0;
     kind = account?.kind ?? AccountKind.bank;
   }
@@ -258,6 +380,7 @@ class _AccountFormSheetState extends State<_AccountFormSheet> {
   void dispose() {
     name.dispose();
     opening.dispose();
+    last4.dispose();
     super.dispose();
   }
 
@@ -305,6 +428,22 @@ class _AccountFormSheetState extends State<_AccountFormSheet> {
             ),
             const SizedBox(height: 12),
             TextFormField(
+              controller: last4,
+              keyboardType: TextInputType.number,
+              maxLength: 4,
+              inputFormatters: [
+                FilteringTextInputFormatter.digitsOnly,
+                LengthLimitingTextInputFormatter(4),
+              ],
+              decoration: const InputDecoration(
+                labelText: 'Last 4 digits of the account or card (optional)',
+                helperText:
+                    'Used to match your bank SMS and statement to this account.',
+                counterText: '',
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextFormField(
               controller: opening,
               keyboardType:
                   const TextInputType.numberWithOptions(decimal: true),
@@ -336,14 +475,20 @@ class _AccountFormSheetState extends State<_AccountFormSheet> {
                 final amount =
                     (parseRupeesToPaise(opening.text) ?? 0) *
                         (negative ? -1 : 1);
+                final digits = last4.text.trim();
                 if (account == null) {
-                  await widget.store.addAccount(name.text, kind,
+                  final created = await widget.store.addAccount(name.text, kind,
                       openingBalancePaise: amount);
+                  if (digits.isNotEmpty) {
+                    await widget.store
+                        .updateAccount(created.copyWith(last4: digits));
+                  }
                 } else {
                   await widget.store.updateAccount(account.copyWith(
                       name: name.text.trim(),
                       kind: kind,
-                      openingBalancePaise: amount));
+                      openingBalancePaise: amount,
+                      last4: digits));
                 }
                 if (context.mounted) Navigator.pop(context);
               },
@@ -356,8 +501,8 @@ class _AccountFormSheetState extends State<_AccountFormSheet> {
   }
 }
 
-Future<void> showTransferForm(
-    BuildContext context, LifePilotStore store) async {
+Future<void> showTransferForm(BuildContext context, LifePilotStore store,
+    {AccountTransfer? transfer}) async {
   final active = store.accounts.where((account) => !account.archived).toList();
   if (active.length < 2) return;
   await showModalBottomSheet<void>(
@@ -366,6 +511,7 @@ Future<void> showTransferForm(
     builder: (sheetContext) => _TransferFormSheet(
       store: store,
       active: active,
+      transfer: transfer,
     ),
   );
 }
@@ -374,10 +520,15 @@ Future<void> showTransferForm(
 /// and disposes them when the sheet widget is disposed (after the exit
 /// animation), avoiding "used after being disposed" crashes.
 class _TransferFormSheet extends StatefulWidget {
-  const _TransferFormSheet({required this.store, required this.active});
+  const _TransferFormSheet({
+    required this.store,
+    required this.active,
+    this.transfer,
+  });
 
   final LifePilotStore store;
   final List<Account> active;
+  final AccountTransfer? transfer;
 
   @override
   State<_TransferFormSheet> createState() => _TransferFormSheetState();
@@ -386,18 +537,24 @@ class _TransferFormSheet extends StatefulWidget {
 class _TransferFormSheetState extends State<_TransferFormSheet> {
   late final TextEditingController amount;
   late final TextEditingController note;
-  var from = '';
-  var to = '';
+  late var from = '';
+  late var to = '';
   String? error;
   final formKey = GlobalKey<FormState>();
 
   @override
   void initState() {
     super.initState();
-    from = widget.active[0].id;
-    to = widget.active[1].id;
-    amount = TextEditingController();
-    note = TextEditingController();
+    final transfer = widget.transfer;
+    from = transfer == null || !widget.active.any((a) => a.id == transfer.fromAccountId)
+        ? widget.active[0].id
+        : transfer.fromAccountId;
+    to = transfer == null || !widget.active.any((a) => a.id == transfer.toAccountId)
+        ? widget.active[1].id
+        : transfer.toAccountId;
+    amount = TextEditingController(
+        text: transfer == null ? '' : paiseToInput(transfer.amountPaise));
+    note = TextEditingController(text: transfer?.note ?? '');
   }
 
   @override
@@ -417,7 +574,7 @@ class _TransferFormSheetState extends State<_TransferFormSheet> {
         child: ListView(
           shrinkWrap: true,
           children: [
-            Text('Move money',
+            Text(widget.transfer == null ? 'Move money' : 'Edit transfer',
                 style: Theme.of(context).textTheme.headlineSmall),
             const SizedBox(height: 4),
             const Text(
@@ -492,22 +649,40 @@ class _TransferFormSheetState extends State<_TransferFormSheet> {
                 final amountPaise = parseRupeesToPaise(amount.text)!;
                 final fromAccount =
                     widget.active.firstWhere((item) => item.id == from);
+                final transfer = widget.transfer;
+                // When editing, the old amount is still counted in the
+                // balance; add it back before checking the new amount.
                 final fromBalance =
-                    widget.store.accountRunningBalance(fromAccount.id);
+                    widget.store.accountRunningBalance(fromAccount.id) +
+                        (transfer != null && transfer.fromAccountId == from
+                            ? transfer.amountPaise
+                            : 0);
                 if (fromBalance < amountPaise) {
                   setState(() => error =
                       'Insufficient balance in ${fromAccount.name} (${formatMoney(fromBalance)} available).');
                   return;
                 }
-                await widget.store.addTransfer(
-                  fromAccountId: from,
-                  toAccountId: to,
-                  amountPaise: amountPaise,
-                  note: note.text,
-                );
+                if (transfer == null) {
+                  await widget.store.addTransfer(
+                    fromAccountId: from,
+                    toAccountId: to,
+                    amountPaise: amountPaise,
+                    note: note.text,
+                  );
+                } else {
+                  await widget.store.updateTransfer(
+                    transfer.id,
+                    fromAccountId: from,
+                    toAccountId: to,
+                    amountPaise: amountPaise,
+                    note: note.text,
+                  );
+                }
                 if (context.mounted) Navigator.pop(context);
               },
-              child: const Text('Save transfer'),
+              child: Text(widget.transfer == null
+                  ? 'Save transfer'
+                  : 'Save changes'),
             ),
           ],
         ),
@@ -545,6 +720,7 @@ class RecurringTab extends StatelessWidget {
       children: [
         BankBalancesSection(store: store),
         PendingDraftsSection(store: store),
+        UnrecognizedSmsSection(store: store),
         SuspiciousSmsSection(store: store),
         MoneyFlowSection(store: store),
         RecurringSuggestionsSection(store: store),
@@ -736,6 +912,65 @@ class SuspiciousSmsSection extends StatelessWidget {
                         FilledButton.tonal(
                           onPressed: () => showScamHelp(context),
                           child: const Text('What to do'),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+/// Bank-like messages whose amount or direction could not be read. They are
+/// kept rather than dropped so nothing is silently lost.
+class UnrecognizedSmsSection extends StatelessWidget {
+  const UnrecognizedSmsSection({required this.store, super.key});
+
+  final LifePilotStore store;
+
+  @override
+  Widget build(BuildContext context) {
+    if (store.unrecognizedSms.isEmpty) return const SizedBox.shrink();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SectionHeader(
+            title: 'Needs review (${store.unrecognizedSms.length})'),
+        for (final item in store.unrecognizedSms.take(10))
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Card(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 12, 8, 4),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('From ${item.sender} · ${formatDate(item.receivedAt)}',
+                        style: Theme.of(context).textTheme.labelLarge),
+                    const SizedBox(height: 4),
+                    if (item.reason.isNotEmpty) Text(item.reason),
+                    const SizedBox(height: 4),
+                    Text('“${item.snippet}”',
+                        maxLines: 3,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                            fontStyle: FontStyle.italic,
+                            color:
+                                Theme.of(context).colorScheme.onSurfaceVariant)),
+                    OverflowBar(
+                      alignment: MainAxisAlignment.end,
+                      children: [
+                        TextButton(
+                          onPressed: () => store.dismissUnrecognized(item.key),
+                          child: const Text('Dismiss'),
+                        ),
+                        FilledButton.tonal(
+                          onPressed: () => showEntryForm(context, store),
+                          child: const Text('Record by hand'),
                         ),
                       ],
                     ),
@@ -997,17 +1232,15 @@ class BankBalancesSection extends StatelessWidget {
           children: [
             for (final balance in balances)
               Builder(builder: (context) {
-                final hint = balance.accountHint;
-                final account = hint == null
-                    ? null
-                    : store.accounts
-                        .where((item) =>
-                            !item.archived && item.name.contains(hint))
-                        .firstOrNull;
+                final account = store.accountForBankBalance(balance);
                 final recorded = account == null
                     ? null
                     : store.accountRunningBalance(account.id);
                 final stale = now.difference(balance.at).inDays >= 7;
+                final mismatched = account != null &&
+                    !balance.isLimit &&
+                    recorded != null &&
+                    recorded != balance.paise;
                 return ListTile(
                   leading: Icon(balance.isLimit
                       ? Icons.credit_card
@@ -1022,11 +1255,40 @@ class BankBalancesSection extends StatelessWidget {
                           : '${account!.name} in LifePilot: ${formatMoney(recorded)} (${formatMoney((balance.paise - recorded).abs())} ${balance.paise > recorded ? 'more' : 'less'} at the bank)',
                   ].join('\n')),
                   isThreeLine: stale || recorded != null,
-                  trailing: Text(
-                    formatMoney(balance.paise),
-                    style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                        fontWeight: FontWeight.w700,
-                        color: balance.paise < 0 ? colors.expense : null),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        formatMoney(balance.paise),
+                        style:
+                            Theme.of(context).textTheme.titleSmall?.copyWith(
+                                fontWeight: FontWeight.w700,
+                                color:
+                                    balance.paise < 0 ? colors.expense : null),
+                      ),
+                      if (mismatched)
+                        PopupMenuButton<String>(
+                          tooltip: 'Balance options',
+                          onSelected: (value) async {
+                            if (value == 'adjust') {
+                              await store.adjustToBankBalance(balance);
+                              if (context.mounted) {
+                                showMessage(context,
+                                    'Set ${account.name} to ${formatMoney(balance.paise)}.');
+                              }
+                            } else if (value == 'ignore') {
+                              await store.ignoreBankBalance(balance);
+                            }
+                          },
+                          itemBuilder: (_) => const [
+                            PopupMenuItem(
+                                value: 'adjust',
+                                child: Text('Adjust LifePilot to this')),
+                            PopupMenuItem(
+                                value: 'ignore', child: Text('Ignore')),
+                          ],
+                        ),
+                    ],
                   ),
                 );
               }),
@@ -1484,10 +1746,22 @@ Future<void> importFromSmsInbox(
     context,
     title: 'Read bank SMS?',
     message:
-        'LifePilot will read messages from the last 30 days on this phone, find completed bank or UPI transactions, and create drafts for you to review. Messages are not stored or sent anywhere; only the drafts you approve are recorded.',
+        'LifePilot will read messages from a date you choose on this phone, find completed bank or UPI transactions, and create drafts for you to review. Messages are not stored or sent anywhere; only the drafts you approve are recorded.',
     confirmLabel: 'Continue',
   );
   if (!agreed || !context.mounted) return;
+
+  // Let the user pick a custom start date instead of always using 30 days.
+  final defaultSince = store.now().subtract(const Duration(days: 30));
+  final picked = await showDatePicker(
+    context: context,
+    initialDate: defaultSince,
+    firstDate: DateTime(store.now().year - 2),
+    lastDate: store.now(),
+  );
+  if (!context.mounted) return;
+  final since = picked ?? defaultSince;
+
   final status = await Permission.sms.request();
   if (!context.mounted) return;
   if (!status.isGranted) {
@@ -1500,7 +1774,6 @@ Future<void> importFromSmsInbox(
     return;
   }
   try {
-    final since = store.now().subtract(const Duration(days: 30));
     final messages = await SmsQuery().querySms(
       kinds: [SmsQueryKind.inbox],
       count: 500,
@@ -1576,4 +1849,225 @@ Future<void> importPastedSms(BuildContext context, LifePilotStore store) async {
       import.drafts.isEmpty
           ? import.summary()
           : '${import.summary()} Check the date of each before approving.');
+}
+
+// ---------------------------------------------------------------------------
+// Pending review page: view, edit and approve all imported drafts in one place
+
+/// Full-screen page for reviewing every pending draft before it becomes a
+/// recorded entry. Each draft can be edited, approved or discarded.
+class PendingReviewPage extends StatefulWidget {
+  const PendingReviewPage({required this.store, super.key});
+
+  final LifePilotStore store;
+
+  @override
+  State<PendingReviewPage> createState() => _PendingReviewPageState();
+}
+
+class _PendingReviewPageState extends State<PendingReviewPage> {
+  @override
+  Widget build(BuildContext context) {
+    final store = widget.store;
+    final drafts = [...store.pending]
+      ..sort((a, b) => a.entry.occurredAt.compareTo(b.entry.occurredAt));
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Review imports'),
+        leading: IconButton(
+          icon: const Icon(Icons.close),
+          onPressed: () => Navigator.pop(context),
+        ),
+        actions: [
+          if (drafts.isNotEmpty)
+            TextButton(
+              onPressed: drafts.isEmpty
+                  ? null
+                  : () async {
+                      final navigator = Navigator.of(context);
+                      final messenger = ScaffoldMessenger.of(context);
+                      if (!await confirmAction(context,
+                          title: 'Approve ${drafts.length} drafts?',
+                          message:
+                              'Each becomes a recorded entry with the values shown.',
+                          confirmLabel: 'Approve all')) {
+                        return;
+                      }
+                      for (final draft in drafts) {
+                        if (!mounted) return;
+                        await store.approvePending(draft.id);
+                      }
+                      if (mounted) navigator.pop();
+                      if (mounted) {
+                        messenger.showSnackBar(SnackBar(
+                          content: Text(
+                              'Approved ${drafts.length} draft${drafts.length == 1 ? '' : 's'}.'),
+                        ));
+                      }
+                    },
+              child: const Text('Approve all'),
+            ),
+        ],
+      ),
+      body: drafts.isEmpty
+          ? const EmptyState(
+              icon: Icons.inbox_outlined,
+              title: 'Nothing waiting for review',
+              message:
+                  'Imported SMS, statement and UPI drafts appear here until you approve them.',
+            )
+          : ListView.builder(
+              padding: pagePadding,
+              itemCount: drafts.length,
+              itemBuilder: (context, index) {
+                final draft = drafts[index];
+                return _PendingDraftCard(
+                  store: store,
+                  draft: draft,
+                  onApprove: () async {
+                    final saved = await store.approvePending(draft.id);
+                    if (context.mounted) {
+                      showMessage(context,
+                          'Recorded ${formatMoney(saved.amountPaise)} · ${saved.title}');
+                    }
+                  },
+                  onEdit: () async {
+                    await showEntryForm(context, store,
+                        template: draft.entry, pendingId: draft.id);
+                    if (context.mounted) setState(() {});
+                  },
+                  onDiscard: () async {
+                    await store.dismissPending(draft.id);
+                    if (context.mounted) setState(() {});
+                  },
+                );
+              },
+            ),
+    );
+  }
+}
+
+/// Individual pending draft card within [PendingReviewPage].
+class _PendingDraftCard extends StatelessWidget {
+  const _PendingDraftCard({
+    required this.store,
+    required this.draft,
+    required this.onApprove,
+    required this.onEdit,
+    required this.onDiscard,
+  });
+
+  final LifePilotStore store;
+  final PendingEntry draft;
+  final VoidCallback onApprove;
+  final VoidCallback onEdit;
+  final VoidCallback onDiscard;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = AppColors.of(context);
+    final entry = draft.entry;
+    final account =
+        entry.accountId != null ? store.accountById(entry.accountId) : null;
+    return Card(
+      margin: const EdgeInsets.only(bottom: 10),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                CircleAvatar(
+                  radius: 20,
+                  backgroundColor:
+                      entry.isIncome ? colors.income : colors.expense,
+                  child: Icon(
+                    entry.isIncome ? Icons.south_west : Icons.north_east,
+                    color: Theme.of(context).colorScheme.onPrimary,
+                    size: 20,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(entry.title,
+                                style: Theme.of(context)
+                                    .textTheme
+                                    .titleSmall
+                                    ?.copyWith(fontWeight: FontWeight.w700)),
+                          ),
+                          Text(
+                            '${entry.isIncome ? '+' : '−'}${formatMoney(entry.amountPaise)}',
+                            style: Theme.of(context)
+                                .textTheme
+                                .titleSmall
+                                ?.copyWith(
+                                    fontWeight: FontWeight.w700,
+                                    color: entry.isIncome
+                                        ? colors.income
+                                        : colors.expense),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        '${entry.isIncome ? 'Credited' : 'Debited'} · ${entry.category} · ${formatDate(entry.occurredAt)}'
+                        '${account == null ? '' : ' · ${account.name}'}',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                      if (draft.balancePaise != null)
+                        Text(
+                            'Balance after: ${formatMoney(draft.balancePaise!)}',
+                            style: Theme.of(context).textTheme.bodySmall),
+                      if (draft.sourceText.isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 4),
+                          child: Text('“${draft.sourceText}”',
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .bodySmall
+                                  ?.copyWith(
+                                      fontStyle: FontStyle.italic,
+                                      color: Theme.of(context)
+                                          .colorScheme
+                                          .onSurfaceVariant)),
+                        ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                TextButton(
+                  onPressed: onEdit,
+                  child: const Text('Edit'),
+                ),
+                TextButton(
+                  onPressed: onDiscard,
+                  child: const Text('Discard'),
+                ),
+                const Spacer(),
+                FilledButton.tonal(
+                  onPressed: onApprove,
+                  child: const Text('Approve'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }

@@ -79,6 +79,37 @@ void main() {
       expect(parsed.rows[1].amountPaise, 5000000);
     });
 
+    test('bank with reversed DR/CR columns uses balance change for direction',
+        () {
+      // Some banks write salary (money in) under the DR column and debits under CR.
+      // The balance column shows the true direction: rising balance = income.
+      const csv = '''
+Tran Date,CHQNO,PARTICULARS,DR,CR,BAL,SOL
+1/11/2026,-,TRINITY Salary OCT 26,20076,,24682.36,2596
+2/11/2026,-,UPI/P2A/BALKIS SHAHUL HAMEED,,13000,11682.36,2596
+3/11/2026,-,UPI/P2A/K ABBAS,,50,11632.36,2596
+3/11/2026,-,UPI/P2M/LENSKART SOLUTIONS,500,,11132.36,2596
+4/11/2026,-,REFUND FROM MERCHANT,500,,11632.36,2596
+''';
+      final parsed = parseStatementTable(
+          readStatementTable('statement.csv', utf8.encode(csv)));
+      expect(parsed.error, isNull);
+      expect(parsed.rows, hasLength(5));
+      // Row 1: first row, no previous balance → falls back to DR column marker
+      // Row 2: CR=13000 but balance fell → expense
+      expect(parsed.rows[1].kind, EntryKind.expense);
+      expect(parsed.rows[1].directionSource, StatementDirectionSource.balance);
+      // Row 3: CR=50 but balance fell → expense
+      expect(parsed.rows[2].kind, EntryKind.expense);
+      expect(parsed.rows[2].directionSource, StatementDirectionSource.balance);
+      // Row 4: DR=500 but balance fell → expense
+      expect(parsed.rows[3].kind, EntryKind.expense);
+      expect(parsed.rows[3].directionSource, StatementDirectionSource.balance);
+      // Row 5: DR=500 but balance rose → income (reversal/refund)
+      expect(parsed.rows[4].kind, EntryKind.income);
+      expect(parsed.rows[4].directionSource, StatementDirectionSource.balance);
+    });
+
     test('Kotak style: one amount column with Dr / Cr', () {
       final parsed = parseStatementTable([
         [
@@ -315,6 +346,40 @@ void main() {
       expect(
           store.pending.every((draft) => draft.entry.accountId == account.id),
           isTrue);
+    });
+
+    testWidgets('a row with no clear direction can be flipped before import',
+        (tester) async {
+      tester.view.physicalSize = const Size(1080, 2340);
+      tester.view.devicePixelRatio = 2.75;
+      addTearDown(tester.view.reset);
+      final store = LifePilotStore.inMemory(clock: () => _now);
+      const csv = '''
+Date,Description,Amount
+02/11/2026,ABC STORE,500.00
+''';
+      final parsed = parseStatementTable(
+          readStatementTable('statement.csv', utf8.encode(csv)));
+      expect(parsed.rows.single.needsReview, isTrue);
+      await tester.pumpWidget(MaterialApp(
+        theme: buildTheme(Brightness.light),
+        home: Scaffold(
+          body: Builder(
+            builder: (context) => TextButton(
+              onPressed: () => reviewStatement(context, store, parsed),
+              child: const Text('Open'),
+            ),
+          ),
+        ),
+      ));
+      await tester.tap(find.text('Open'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('could not be read'), findsOneWidget);
+      await tester.tap(find.byTooltip('Flip credit and debit'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Create 1 drafts'));
+      await tester.pumpAndSettle();
+      expect(store.pending.single.entry.kind, EntryKind.income);
     });
   });
 

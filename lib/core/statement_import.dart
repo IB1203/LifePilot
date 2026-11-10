@@ -1,12 +1,17 @@
 import 'formatters.dart';
 import 'local_store.dart';
 import 'models.dart';
-import 'personal.dart' show suggestCategory;
+import 'personal.dart' show suggestCategory, dedupKeyForEntry;
 import 'sms_import.dart' show ruleCategory;
 
 /// Bank statements exported from net banking as CSV or Excel. Banks lay
 /// them out differently, so columns are found by their headings rather
 /// than by position. Rows become drafts the user reviews, like bank SMS.
+
+/// How a statement row's direction was worked out. The order matters:
+/// a bank's own marker wins, then a balance change, then wording, and
+/// anything left over is flagged for the user to review.
+enum StatementDirectionSource { columns, marker, balance, keywords, review }
 
 class StatementRow {
   const StatementRow({
@@ -15,6 +20,17 @@ class StatementRow {
     required this.kind,
     required this.amountPaise,
     this.balancePaise,
+    this.directionSource = StatementDirectionSource.review,
+    this.needsReview = false,
+    this.classification = TransactionClassification.other,
+    this.validationStatus = ValidationStatus.unverified,
+    this.confidenceScore = 0.0,
+    this.columnDirection,
+    this.balanceDirection,
+    this.expectedBalance,
+    this.actualBalance,
+    this.balanceDifference,
+    this.refundLinkId,
   });
 
   final DateTime date;
@@ -24,10 +40,110 @@ class StatementRow {
 
   /// Balance after this row, if the statement has a balance column.
   final int? balancePaise;
+  final StatementDirectionSource directionSource;
+
+  /// True when no marker, balance change or wording decided the direction.
+  final bool needsReview;
+
+  /// Financial classification separate from direction.
+  final TransactionClassification classification;
+
+  /// Validation status from balance reconciliation.
+  final ValidationStatus validationStatus;
+
+  /// Confidence score from 0.0 to 1.0.
+  final double confidenceScore;
+
+  /// Direction from DR/CR columns (may be reversed).
+  final EntryKind? columnDirection;
+
+  /// Direction from balance change analysis.
+  final EntryKind? balanceDirection;
+
+  /// Expected balance after this transaction.
+  final int? expectedBalance;
+
+  /// Actual balance from the statement.
+  final int? actualBalance;
+
+  /// Difference between expected and actual balance.
+  final int? balanceDifference;
+
+  /// ID of linked refund/original transaction.
+  final String? refundLinkId;
+
+  bool get isIncome => kind == EntryKind.income;
+
+  /// The same row with money in and money out swapped.
+  StatementRow flipped() => StatementRow(
+        date: date,
+        narration: narration,
+        kind: kind == EntryKind.expense ? EntryKind.income : EntryKind.expense,
+        amountPaise: amountPaise,
+        balancePaise: balancePaise,
+        directionSource: directionSource,
+        needsReview: false,
+        classification: classification,
+        validationStatus: validationStatus,
+        confidenceScore: confidenceScore,
+        columnDirection: columnDirection,
+        balanceDirection: balanceDirection,
+        expectedBalance: expectedBalance,
+        actualBalance: actualBalance,
+        balanceDifference: balanceDifference,
+        refundLinkId: refundLinkId,
+      );
+
+  StatementRow copyWith({
+    EntryKind? kind,
+    StatementDirectionSource? directionSource,
+    bool? needsReview,
+    TransactionClassification? classification,
+    ValidationStatus? validationStatus,
+    double? confidenceScore,
+    EntryKind? columnDirection,
+    EntryKind? balanceDirection,
+    int? expectedBalance,
+    int? actualBalance,
+    int? balanceDifference,
+    String? refundLinkId,
+  }) =>
+      StatementRow(
+        date: date,
+        narration: narration,
+        kind: kind ?? this.kind,
+        amountPaise: amountPaise,
+        balancePaise: balancePaise,
+        directionSource: directionSource ?? this.directionSource,
+        needsReview: needsReview ?? this.needsReview,
+        classification: classification ?? this.classification,
+        validationStatus: validationStatus ?? this.validationStatus,
+        confidenceScore: confidenceScore ?? this.confidenceScore,
+        columnDirection: columnDirection ?? this.columnDirection,
+        balanceDirection: balanceDirection ?? this.balanceDirection,
+        expectedBalance: expectedBalance ?? this.expectedBalance,
+        actualBalance: actualBalance ?? this.actualBalance,
+        balanceDifference: balanceDifference ?? this.balanceDifference,
+        refundLinkId: refundLinkId ?? this.refundLinkId,
+      );
+
+  /// A card's balance usually means "amount owed", so a rising balance is a
+  /// debit rather than a credit. Rows decided by a marker or by wording are
+  /// already written from the cardholder's point of view and are unchanged.
+  StatementRow forAccount({required bool creditCard}) {
+    if (!creditCard ||
+        directionSource != StatementDirectionSource.balance) {
+      return this;
+    }
+    return copyWith(
+      kind: kind == EntryKind.income ? EntryKind.expense : EntryKind.income,
+    );
+  }
 }
 
 class StatementParse {
-  const StatementParse(this.rows, {this.skipped = 0, this.error});
+  const StatementParse(this.rows,
+      {this.skipped = 0, this.error, this.mapping});
 
   final List<StatementRow> rows;
 
@@ -36,6 +152,9 @@ class StatementParse {
 
   /// Why nothing could be read, when [rows] is empty.
   final String? error;
+
+  /// Column positions that were used, so they can be saved per bank.
+  final StatementMapping? mapping;
 }
 
 String _norm(String value) => value
@@ -135,82 +254,469 @@ int? parseStatementAmount(String value) {
   return paise == null ? null : sign * paise;
 }
 
+/// Wording used only when a statement has neither a direction marker nor a
+/// usable balance change. Kept narrower than SMS keywords so a payee name
+/// cannot decide the direction.
+final _debitWords = RegExp(
+  r'\b(withdrawal|withdrawn|debit|dr|atm wdl|atm withdrawal|cash wd|'
+  r'purchase|paid|payment to|sent|trf to|transfer to|to transfer|pos)\b',
+  caseSensitive: false,
+);
+final _creditWords = RegExp(
+  r'\b(deposit|deposited|credit|cr|refund|reversal|reversed|rev|'
+  r'interest credit|salary|received|received from|credit from)\b',
+  caseSensitive: false,
+);
+
+EntryKind? _keywordDirection(String narration) {
+  final debit = _debitWords.firstMatch(narration);
+  final credit = _creditWords.firstMatch(narration);
+  if (debit == null && credit == null) return null;
+  if (debit == null) return EntryKind.income;
+  if (credit == null) return EntryKind.expense;
+  return debit.start < credit.start ? EntryKind.expense : EntryKind.income;
+}
+
+/// Determines direction from a balance change: positive change = credit
+/// (money in), negative change = debit (money out). For credit cards this is
+/// inverted because the balance normally represents amount owed.
+EntryKind? _balanceChangeKind(int change, bool creditCard) {
+  if (change == 0) return null;
+  final credit = creditCard ? change < 0 : change > 0;
+  return credit ? EntryKind.income : EntryKind.expense;
+}
+
+class _RawStatementRow {
+  _RawStatementRow({
+    required this.index,
+    required this.date,
+    required this.narration,
+    required this.amountPaise,
+    this.markerKind,
+    this.markerSource,
+    this.balancePaise,
+  });
+
+  final int index;
+  final DateTime date;
+  final String narration;
+  final int amountPaise;
+  final EntryKind? markerKind;
+  final StatementDirectionSource? markerSource;
+  final int? balancePaise;
+
+  EntryKind? kind;
+  StatementDirectionSource source = StatementDirectionSource.review;
+  bool needsReview = false;
+  double confidenceScore = 0.0;
+  ValidationStatus validationStatus = ValidationStatus.unverified;
+  EntryKind? columnDirection;
+  EntryKind? balanceDirection;
+  int? expectedBalance;
+  int? actualBalance;
+  int? balanceDifference;
+  String? refundLinkId;
+}
+
 /// Reads a statement table (rows of cells). Finds the heading row within
 /// the first 40 rows, then reads every row under it that has a date and an
-/// amount.
-StatementParse parseStatementTable(List<List<String>> table) {
+/// amount. A direction is decided in this order: the bank's own Dr/Cr marker
+/// or debit/credit columns, then the change in the running balance, then
+/// wording in the narration. Anything still unclear is kept and flagged for
+/// review so no transaction is silently mis-signed.
+StatementParse parseStatementTable(
+  List<List<String>> table, {
+  StatementMapping? mapping,
+  bool creditCard = false,
+}) {
   for (var h = 0; h < table.length && h < 40; h++) {
     final header = [for (final cell in table[h]) _norm(cell)];
-    final date = _column(header,
-            ['txn date', 'transaction date', 'tran date', 'date', 'value date'],
-            avoid: ['value date']) ??
-        _column(header, ['value date']);
-    final narration = _column(header, [
-      'narration',
-      'description',
-      'particulars',
-      'transaction details',
-      'transaction remarks',
-      'remarks',
-      'details',
-    ]);
-    final debit = _column(header, ['withdrawal', 'debit', 'dr amount', 'dr'],
-        avoid: ['credit']);
-    final credit = _column(header, ['deposit', 'credit', 'cr amount', 'cr'],
-        avoid: ['debit', 'card']);
-    final amount = _column(header, ['amount'],
-        avoid: ['withdrawal', 'deposit', 'debit', 'credit', 'balance']);
-    final type = _column(header, ['dr/cr', 'cr/dr', 'type', 'debit/credit']);
-    final balance = _column(header, ['closing balance', 'balance', 'bal']);
+    final saved = mapping != null &&
+            mapping.header.length == header.length &&
+            _sameHeader(mapping.header, header)
+        ? mapping
+        : null;
+    final date = saved?.dateIndex ??
+        _column(header,
+                ['txn date', 'transaction date', 'tran date', 'date', 'value date'],
+                avoid: ['value date']) ??
+            _column(header, ['value date']);
+    final narration = saved?.narrationIndex ??
+        _column(header, [
+          'narration',
+          'description',
+          'particulars',
+          'transaction details',
+          'transaction remarks',
+          'remarks',
+          'details',
+        ]);
+    final debit = saved?.debitIndex ??
+        _column(header, ['withdrawal', 'debit', 'dr amount', 'dr'],
+            avoid: ['credit']);
+    final credit = saved?.creditIndex ??
+        _column(header, ['deposit', 'credit', 'cr amount', 'cr'],
+            avoid: ['debit', 'card']);
+    final amount = saved?.amountIndex ??
+        _column(header, ['amount'],
+            avoid: ['withdrawal', 'deposit', 'debit', 'credit', 'balance']);
+    final type = saved?.typeIndex ??
+        _column(header, ['dr/cr', 'cr/dr', 'type', 'debit/credit']);
+    final balance = saved?.balanceIndex ??
+        _column(header, ['closing balance', 'balance', 'bal']);
     final hasAmounts = (debit != null && credit != null) || amount != null;
     if (date == null || narration == null || !hasAmounts) continue;
+    final headerMapping = StatementMapping(
+      bank: '',
+      header: header,
+      dateIndex: date,
+      narrationIndex: narration,
+      debitIndex: debit,
+      creditIndex: credit,
+      amountIndex: amount,
+      typeIndex: type,
+      balanceIndex: balance,
+      creditCard: creditCard,
+    );
 
-    final rows = <StatementRow>[];
+    final raw = <_RawStatementRow>[];
+    // Balance shown on rows without an amount, such as "Opening Balance".
+    final balanceOnly = <int, int>{};
     var skipped = 0;
     String cell(List<String> row, int? index) =>
         index == null || index >= row.length ? '' : row[index].trim();
+    var position = -1;
     for (final row in table.skip(h + 1)) {
+      position++;
       if (row.every((value) => value.trim().isEmpty)) continue;
       final when = parseStatementDate(cell(row, date));
-      int? signed;
+      if (when == null) {
+        skipped++;
+        continue;
+      }
+      int? amountPaise;
+      EntryKind? markerKind;
+      StatementDirectionSource? markerSource;
       if (debit != null && credit != null) {
         final out = parseStatementAmount(cell(row, debit));
         final into = parseStatementAmount(cell(row, credit));
         if (out != null && out != 0) {
-          signed = -out.abs();
+          amountPaise = out.abs();
+          markerKind = EntryKind.expense;
+          markerSource = StatementDirectionSource.columns;
         } else if (into != null && into != 0) {
-          signed = into.abs();
+          amountPaise = into.abs();
+          markerKind = EntryKind.income;
+          markerSource = StatementDirectionSource.columns;
         }
       } else {
-        signed = parseStatementAmount(cell(row, amount));
+        final signed = parseStatementAmount(cell(row, amount));
+        if (signed != null && signed != 0) {
+          amountPaise = signed.abs();
         final marker = _norm(cell(row, type));
-        if (signed != null && marker.isNotEmpty) {
-          final out = marker.startsWith('d') || marker.contains('withdraw');
-          signed = out ? -signed.abs() : signed.abs();
+        if (signed < 0) {
+          // Some banks write credits with a minus sign (bank liability view).
+          // Trust the Dr/Cr column when it says so.
+          final isCredit = marker.contains('cr') || marker.contains('credit');
+          markerKind = isCredit ? EntryKind.income : EntryKind.expense;
+          markerSource = StatementDirectionSource.marker;
+        } else if (signed > 0 && marker.isNotEmpty) {
+            final out =
+                marker.startsWith('d') || marker.contains('withdraw');
+            markerKind =
+                out ? EntryKind.expense : EntryKind.income;
+            markerSource = StatementDirectionSource.marker;
+          }
         }
       }
-      if (when == null || signed == null || signed == 0) {
+      final rowBalance = parseStatementAmount(cell(row, balance));
+      if (amountPaise == null || amountPaise == 0) {
+        if (rowBalance != null) balanceOnly[position] = rowBalance;
         skipped++;
         continue;
       }
-      rows.add(StatementRow(
+      raw.add(_RawStatementRow(
+        index: position,
         date: when,
         narration: cell(row, narration).replaceAll(RegExp(r'\s+'), ' '),
-        kind: signed < 0 ? EntryKind.expense : EntryKind.income,
-        amountPaise: signed.abs(),
-        balancePaise: parseStatementAmount(cell(row, balance)),
+        amountPaise: amountPaise,
+        markerKind: markerKind,
+        markerSource: markerSource,
+        balancePaise: rowBalance,
       ));
     }
-    if (rows.isEmpty) {
+    if (raw.isEmpty) {
       return StatementParse(const [],
           skipped: skipped,
-          error: 'Found the columns but no transactions under them.');
+          error: 'Found the columns but no transactions under them.',
+          mapping: headerMapping);
     }
-    return StatementParse(rows, skipped: skipped);
+
+    // Read balances in the order the statement lists them. When the file is
+    // newest-first, walk it backwards; same-day transactions keep their
+    // order either way.
+    final oldestFirst =
+        !raw.first.date.isAfter(raw.last.date);
+    final chronological = oldestFirst ? raw : raw.reversed.toList();
+    // Start from the opening balance printed beside the transactions, so the
+    // first transaction's direction can be read from the balance change too.
+    int? previousBalance;
+    if (balanceOnly.isNotEmpty) {
+      if (oldestFirst) {
+        final before = balanceOnly.keys
+            .where((index) => index < raw.first.index)
+            .toList()
+          ..sort();
+        if (before.isNotEmpty) previousBalance = balanceOnly[before.last];
+      } else {
+        final after = balanceOnly.keys
+            .where((index) => index > raw.last.index)
+            .toList()
+          ..sort();
+        if (after.isNotEmpty) previousBalance = balanceOnly[after.first];
+      }
+    }
+    for (final row in chronological) {
+      final previous = previousBalance;
+      final balanceKind = row.balancePaise != null && previous != null
+          ? _balanceChangeKind(row.balancePaise! - previous, creditCard)
+          : null;
+      final columnKind = row.markerKind;
+      final columnSource = row.markerSource;
+
+      EntryKind? decidedKind;
+      StatementDirectionSource decidedSource = StatementDirectionSource.review;
+      double confidence;
+      ValidationStatus validation;
+      bool needsReviewFlag = false;
+
+      // Balance change is the most reliable indicator of direction.
+      if (balanceKind != null) {
+        decidedKind = balanceKind;
+        decidedSource = StatementDirectionSource.balance;
+        final colAgrees = columnKind != null && columnKind == balanceKind;
+        if (colAgrees) {
+          confidence = 0.95;
+          validation = ValidationStatus.verified;
+        } else if (columnKind != null) {
+          // Column says one thing, balance says another — flag for review.
+          confidence = 0.30;
+          validation = ValidationStatus.needsReview;
+          needsReviewFlag = true;
+        } else {
+          confidence = 0.90;
+          validation = ValidationStatus.verified;
+        }
+      } else if (columnKind != null) {
+        decidedKind = columnKind;
+        decidedSource = columnSource!;
+        confidence = 0.60;
+        validation = ValidationStatus.partiallyVerified;
+      } else {
+        final keyword = _keywordDirection(row.narration);
+        if (keyword != null) {
+          decidedKind = keyword;
+          decidedSource = StatementDirectionSource.keywords;
+          confidence = 0.40;
+          validation = ValidationStatus.partiallyVerified;
+        } else {
+          decidedKind = EntryKind.expense;
+          decidedSource = StatementDirectionSource.review;
+          confidence = 0.10;
+          validation = ValidationStatus.unverified;
+          needsReviewFlag = true;
+        }
+      }
+
+      row.kind = decidedKind;
+      row.source = decidedSource;
+      row.confidenceScore = confidence;
+      row.validationStatus = validation;
+      row.needsReview = needsReviewFlag;
+      row.columnDirection = columnKind;
+      row.balanceDirection = balanceKind;
+      row.expectedBalance = previous != null
+          ? previous + (decidedKind == EntryKind.income
+              ? row.amountPaise
+              : -row.amountPaise)
+          : null;
+      row.actualBalance = row.balancePaise;
+      if (row.expectedBalance != null && row.balancePaise != null) {
+        row.balanceDifference =
+            row.balancePaise! - row.expectedBalance!;
+      }
+
+      if (row.balancePaise != null) previousBalance = row.balancePaise;
+    }
+
+    // Detect refunds/reversals: pairs of opposite-direction transactions with
+    // matching amounts and refund-related wording.
+    _detectRefunds(raw);
+
+    final rows = [
+      for (final row in raw)
+        StatementRow(
+          date: row.date,
+          narration: row.narration,
+          kind: row.kind ?? EntryKind.expense,
+          amountPaise: row.amountPaise,
+          balancePaise: row.balancePaise,
+          directionSource: row.source,
+          needsReview: row.needsReview,
+          classification: _classifyTransaction(row),
+          validationStatus: row.validationStatus,
+          confidenceScore: row.confidenceScore,
+          columnDirection: row.columnDirection,
+          balanceDirection: row.balanceDirection,
+          expectedBalance: row.expectedBalance,
+          actualBalance: row.actualBalance,
+          balanceDifference: row.balanceDifference,
+          refundLinkId: row.refundLinkId,
+        ),
+    ];
+    return StatementParse(rows, skipped: skipped, mapping: headerMapping);
   }
   return const StatementParse([],
       error:
           'Could not find the Date, Description and amount columns. Export the statement as CSV or Excel from net banking and try again.');
+}
+
+/// Detects refund/reversal pairs: opposite-direction transactions with
+/// matching amounts and refund-related wording. Links them via
+/// [refundLinkId] so they can be reviewed together.
+void _detectRefunds(List<_RawStatementRow> rows) {
+  final refundWords = RegExp(
+    r'\b(refund|reversal|reversed|rev|chargeback|returned)\b',
+    caseSensitive: false,
+  );
+
+  // Group row indices by rounded amount (within 50 paise tolerance).
+  final byAmount = <int, List<int>>{};
+  for (var i = 0; i < rows.length; i++) {
+    final key = (rows[i].amountPaise ~/ 50) * 50;
+    byAmount.putIfAbsent(key, () => <int>[]).add(i);
+  }
+
+  final linked = <int>{};
+  for (final indices in byAmount.values) {
+    if (indices.length < 2) continue;
+
+    final incomeIdx = <int>[];
+    final expenseIdx = <int>[];
+    for (final i in indices) {
+      if (linked.contains(i)) continue;
+      if (rows[i].kind == EntryKind.income) {
+        incomeIdx.add(i);
+      } else {
+        expenseIdx.add(i);
+      }
+    }
+
+    for (final i in incomeIdx) {
+      if (linked.contains(i)) continue;
+      final incomeRow = rows[i];
+        final isIncomeRefund = refundWords.hasMatch(incomeRow.narration);
+      for (final j in expenseIdx) {
+        if (linked.contains(j)) continue;
+        final expenseRow = rows[j];
+        final isExpenseRefund = refundWords.hasMatch(expenseRow.narration);
+
+        // Link if either side mentions refund/reversal, or if amounts match
+        // and dates are close (same day or adjacent).
+        final daysDiff =
+            (incomeRow.date.difference(expenseRow.date).inDays).abs();
+        final isRefundPair =
+            (isIncomeRefund || isExpenseRefund) && daysDiff <= 1;
+
+        if (isRefundPair) {
+          linked.add(i);
+          linked.add(j);
+          rows[i].refundLinkId = 'refund:${expenseRow.index}';
+          rows[j].refundLinkId = 'refund:${incomeRow.index}';
+          break;
+        }
+      }
+    }
+  }
+}
+
+/// Classifies a transaction based on narration keywords and direction.
+TransactionClassification _classifyTransaction(_RawStatementRow row) {
+  final text = row.narration.toLowerCase();
+  final kind = row.kind;
+
+  if (row.refundLinkId != null) return TransactionClassification.refund;
+
+  if (kind == EntryKind.income) {
+    if (RegExp(r'\b(salary|payroll|wages|credit from)\b').hasMatch(text)) {
+      return TransactionClassification.income;
+    }
+    if (RegExp(r'\b(loan|borrowed|lent)\b').hasMatch(text)) {
+      return TransactionClassification.loanReceived;
+    }
+    if (RegExp(r'\b(investment|withdraw|redeem|sell)\b').hasMatch(text)) {
+      return TransactionClassification.investment;
+    }
+    return TransactionClassification.receivedMoney;
+  }
+
+  // expense side
+  if (RegExp(r'\b(atm|cash withdrawal|cash wd|withdrawal)\b').hasMatch(text)) {
+    return TransactionClassification.cashWithdrawal;
+  }
+  if (RegExp(r'\b(emi|loan repayment|loan pay|credit card bill)\b')
+      .hasMatch(text)) {
+    return TransactionClassification.debtPayment;
+  }
+  if (RegExp(r'\b(electricity|bill|recharge|broadband|water|gas)\b')
+      .hasMatch(text)) {
+    return TransactionClassification.bills;
+  }
+  if (RegExp(
+          r'\b(amazon|flipkart|shopping|mall|store|retail|purchase)\b')
+      .hasMatch(text)) {
+    return TransactionClassification.shopping;
+  }
+  if (RegExp(
+          r'\b(swiggy|zomato|restaurant|food|cafe|dominos|pizza|mcdonald)\b')
+      .hasMatch(text)) {
+    return TransactionClassification.food;
+  }
+  if (RegExp(
+          r'\b(investment|sip|mutual fund|stock|groww|zerodha|deposit)\b')
+      .hasMatch(text)) {
+    return TransactionClassification.investment;
+  }
+  if (RegExp(r'\b(transfer|upi to|self|own account|neft|imps)\b')
+      .hasMatch(text)) {
+    return TransactionClassification.transfer;
+  }
+
+  return TransactionClassification.other;
+}
+
+bool _sameHeader(List<String> a, List<String> b) {
+  if (a.length != b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    if (a[i] != b[i]) return false;
+  }
+  return true;
+}
+
+/// The saved layout whose heading row appears in [table], if any. Used so a
+/// bank's columns are remembered between imports.
+StatementMapping? findStatementMapping(
+    Iterable<StatementMapping> mappings, List<List<String>> table) {
+  for (var h = 0; h < table.length && h < 40; h++) {
+    final header = [for (final cell in table[h]) _norm(cell)];
+    for (final mapping in mappings) {
+      if (mapping.header.length == header.length &&
+          _sameHeader(mapping.header, header)) {
+        return mapping;
+      }
+    }
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -296,6 +802,9 @@ class StatementImport {
   /// Keys of rows to remember, so a re-import skips them.
   final keys = <String>[];
 
+  /// Rows whose direction could not be decided and should be checked.
+  var needsReview = 0;
+
   /// Closing balance: the last row's balance, with its date.
   ({int paise, DateTime at})? closing;
 
@@ -312,14 +821,16 @@ class StatementImport {
 /// transaction, each used once, so two equal payments are not merged.
 StatementImport buildStatementImport(
     LifePilotStore store, List<StatementRow> rows,
-    {String? accountId}) {
+    {String? accountId, bool creditCard = false}) {
   final result = StatementImport();
   final existing = [
     ...store.entries,
     for (final draft in store.pending) draft.entry,
   ];
   final used = <int>{};
-  for (final row in rows) {
+  for (final original in rows) {
+    final row = original.forAccount(creditCard: creditCard);
+    if (row.needsReview) result.needsReview++;
     final key = statementKey(row);
     if (store.seenSms.contains(key) || result.keys.contains(key)) {
       result.alreadyImported++;
@@ -351,10 +862,25 @@ StatementImport buildStatementImport(
         (refund ? 'Refunds' : null) ??
         suggestCategory(store.entries, party, kind: row.kind) ??
         'Other';
+    final dedupKey = dedupKeyForEntry(
+      kind: row.kind,
+      amountPaise: row.amountPaise,
+      occurredAt: row.date,
+      merchant: party,
+    );
+    // Skip if this transaction is already waiting as a draft from a
+    // different source (e.g. SMS import) — same amount, date and merchant.
+    // Within the same statement batch, exact duplicates are already handled
+    // by the duplicate detection above.
+    if (store.pending.any((d) => d.dedupKey == dedupKey)) {
+      result.alreadyImported++;
+      continue;
+    }
     result.drafts.add(PendingEntry(
       id: '',
       source: 'statement',
       sourceKey: key,
+      dedupKey: dedupKey,
       createdAt: store.now(),
       sourceText: row.narration,
       balancePaise: row.balancePaise,

@@ -382,81 +382,126 @@ class _LockScreenState extends State<LockScreen> {
 }
 
 /// Lets the user choose a new 4–6 digit PIN and stores only its hash.
-Future<bool> showSetPinDialog(
-    BuildContext context, LifePilotStore store) async {
-  final first = TextEditingController();
-  final second = TextEditingController();
-  final formKey = GlobalKey<FormState>();
-  var saving = false;
-  final ok = await showDialog<bool>(
+Future<bool> showSetPinDialog(BuildContext context, LifePilotStore store) async {
+  return (await showDialog<bool>(
     context: context,
     barrierDismissible: false,
-    builder: (dialogContext) => StatefulBuilder(
-      builder: (dialogContext, setDialogState) => AlertDialog(
-        title: const Text('Set an app PIN'),
-        content: Form(
-          key: formKey,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Text(
-                  'Use 4 to 6 digits. If you forget it, the only way back in is to clear the app data, which deletes your records unless you have a backup.'),
-              const SizedBox(height: 12),
-              TextFormField(
-                controller: first,
-                autofocus: true,
-                obscureText: true,
-                keyboardType: TextInputType.number,
-                maxLength: 6,
-                inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                decoration: const InputDecoration(labelText: 'New PIN'),
-                validator: (value) => value == null || value.length < 4
-                    ? 'Enter at least 4 digits.'
-                    : null,
+    builder: (dialogContext) => _SetPinDialog(store: store),
+  )) ??
+      false;
+}
+
+/// Dialog widget that manages its own text controllers so they are never
+/// used after disposal during IME show/hide or dialog rebuilds.
+class _SetPinDialog extends StatefulWidget {
+  const _SetPinDialog({required this.store});
+
+  final LifePilotStore store;
+
+  @override
+  State<_SetPinDialog> createState() => _SetPinDialogState();
+}
+
+class _SetPinDialogState extends State<_SetPinDialog> {
+  late final TextEditingController first;
+  late final TextEditingController second;
+  final formKey = GlobalKey<FormState>();
+  var saving = false;
+  String? errorMessage;
+
+  @override
+  void initState() {
+    super.initState();
+    first = TextEditingController();
+    second = TextEditingController();
+  }
+
+  @override
+  void dispose() {
+    first.dispose();
+    second.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Set an app PIN'),
+      content: Form(
+        key: formKey,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+                'Use 4 to 6 digits. If you forget it, the only way back in is to clear the app data, which deletes your records unless you have a backup.'),
+            const SizedBox(height: 12),
+            if (errorMessage != null)
+              Text(
+                errorMessage!,
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
               ),
-              TextFormField(
-                controller: second,
-                obscureText: true,
-                keyboardType: TextInputType.number,
-                maxLength: 6,
-                inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                decoration: const InputDecoration(labelText: 'Confirm PIN'),
-                validator: (value) =>
-                    value != first.text ? 'The PINs do not match.' : null,
-              ),
-            ],
-          ),
+            const SizedBox(height: 12),
+            TextFormField(
+              controller: first,
+              autofocus: true,
+              obscureText: true,
+              keyboardType: TextInputType.number,
+              maxLength: 6,
+              inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+              decoration: const InputDecoration(labelText: 'New PIN'),
+              validator: (value) => value == null || value.length < 4
+                  ? 'Enter at least 4 digits.'
+                  : null,
+            ),
+            TextFormField(
+              controller: second,
+              obscureText: true,
+              keyboardType: TextInputType.number,
+              maxLength: 6,
+              inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+              decoration: const InputDecoration(labelText: 'Confirm PIN'),
+              validator: (value) =>
+                  value != first.text ? 'The PINs do not match.' : null,
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed:
-                saving ? null : () => Navigator.pop(dialogContext, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: saving
-                ? null
-                : () async {
-                    if (!formKey.currentState!.validate()) return;
-                    setDialogState(() => saving = true);
-                    final hashed = await hashPin(first.text);
-                    await store.updateSettings(store.settings.copyWith(
-                      pinHash: hashed.hash,
-                      pinSalt: hashed.salt,
-                      lockEnabled: true,
-                      clearPinLockout: true,
-                    ));
-                    if (dialogContext.mounted) {
-                      Navigator.pop(dialogContext, true);
-                    }
-                  },
-            child: Text(saving ? 'Saving…' : 'Set PIN'),
-          ),
-        ],
       ),
-    ),
-  );
-  first.dispose();
-  second.dispose();
-  return ok == true;
+      actions: [
+        TextButton(
+          onPressed: saving ? null : () => Navigator.pop(context, false),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: saving
+              ? null
+              : () async {
+                  if (!formKey.currentState!.validate()) return;
+                  setState(() {
+                    saving = true;
+                    errorMessage = null;
+                  });
+                  try {
+                    final navigator = Navigator.of(context);
+                    final hashed = await hashPin(first.text);
+                    await widget.store.updateSettings(
+                      widget.store.settings.copyWith(
+                        pinHash: hashed.hash,
+                        pinSalt: hashed.salt,
+                        lockEnabled: true,
+                        clearPinLockout: true,
+                      ),
+                    );
+                    if (mounted) navigator.pop(true);
+                  } on Object catch (error) {
+                    setState(() {
+                      saving = false;
+                      errorMessage = 'Could not set the PIN: $error';
+                    });
+                  }
+                },
+          child: Text(saving ? 'Saving…' : 'Set PIN'),
+        ),
+      ],
+    );
+  }
 }

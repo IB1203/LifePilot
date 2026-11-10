@@ -34,6 +34,13 @@ import 'repositories/life_pilot_investment_repository.dart';
 import 'repositories/life_pilot_account_repository.dart';
 import 'repositories/life_pilot_bill_repository.dart';
 
+/// Last four digits found in a masked account number, e.g. "XXXX 1234".
+String _trailingDigits(String? value) {
+  if (value == null) return '';
+  final digits = value.replaceAll(RegExp(r'\D'), '');
+  return digits.length <= 4 ? digits : digits.substring(digits.length - 4);
+}
+
 /// The single source of truth for on-device records. Data is kept in memory
 /// and written to one versioned JSON file in the app's private support
 /// directory after every change. When a [DataCipher] is available the file
@@ -96,7 +103,14 @@ class LifePilotStore extends ChangeNotifier {
   final List<Habit> habits = [];
   final List<Payee> payees = [];
   final List<SuspiciousSms> suspiciousSms = [];
+  final List<UnrecognizedSms> unrecognizedSms = [];
   final List<CategoryRule> categoryRules = [];
+
+  /// Saved statement column layouts, per bank.
+  final List<StatementMapping> statementMappings = [];
+
+  /// Bank balance keys the user chose to ignore instead of adjusting to.
+  final Set<String> ignoredBalanceKeys = {};
 
   /// Fingerprints of SMS messages and statement rows already turned into
   /// drafts or dismissed.
@@ -310,13 +324,28 @@ class LifePilotStore extends ChangeNotifier {
     final decodedPayees = _readList(root, 'payees', Payee.fromJson);
     final decodedSuspicious =
         _readList(root, 'suspiciousSms', SuspiciousSms.fromJson);
+    final decodedUnrecognized =
+        _readList(root, 'unrecognizedSms', UnrecognizedSms.fromJson);
     final decodedRules =
         _readList(root, 'categoryRules', CategoryRule.fromJson);
+    final decodedMappings =
+        _readList(root, 'statementMappings', StatementMapping.fromJson);
+    final storedIgnored = root['ignoredBalanceKeys'];
+    final decodedIgnored = storedIgnored is List
+        ? storedIgnored.whereType<String>().toSet()
+        : <String>{};
     final storedSms = root['seenSms'];
     final decodedSms =
         storedSms is List ? storedSms.whereType<String>().toSet() : <String>{};
     final decodedBalances =
         _readList(root, 'bankBalances', BankBalance.fromJson);
+    final storedRunning = root['accountBalances'];
+    final decodedRunning = <String, int>{
+      if (storedRunning is Map)
+        for (final item in storedRunning.entries)
+          if (item.key is String && item.value is int)
+            item.key as String: item.value as int,
+    };
     final decodedDebts = _readList(root, 'debts', Debt.fromJson);
     final decodedInvestments =
         _readList(root, 'investments', Investment.fromJson);
@@ -375,9 +404,15 @@ class LifePilotStore extends ChangeNotifier {
     habits.addAll(decodedHabits);
     payees.addAll(decodedPayees);
     suspiciousSms.addAll(decodedSuspicious);
+    unrecognizedSms.addAll(decodedUnrecognized);
     categoryRules.addAll(decodedRules);
+    statementMappings.addAll(decodedMappings);
+    ignoredBalanceKeys.addAll(decodedIgnored);
     seenSms.addAll(decodedSms);
     bankBalances.addAll(decodedBalances);
+    _accountBalances
+      ..clear()
+      ..addAll(decodedRunning);
     debts.addAll(decodedDebts);
     investments.addAll(decodedInvestments);
     taxRuleOverrides.addAll(decodedTaxRules);
@@ -406,9 +441,13 @@ class LifePilotStore extends ChangeNotifier {
     habits.clear();
     payees.clear();
     suspiciousSms.clear();
+    unrecognizedSms.clear();
     categoryRules.clear();
+    statementMappings.clear();
+    ignoredBalanceKeys.clear();
     seenSms.clear();
     bankBalances.clear();
+    _accountBalances.clear();
     dismissedSuggestions.clear();
     debts.clear();
     investments.clear();
@@ -472,8 +511,37 @@ class LifePilotStore extends ChangeNotifier {
         extra: [
           ...maturityReminders(investments, now()),
           ...expiryReminders(vault, now()),
+          ..._lendingNotifications(),
         ],
       );
+
+  List<PlannedNotification> _lendingNotifications() {
+    final current = now();
+    final result = <PlannedNotification>[];
+    for (final debt in debts) {
+      if (!debt.owedToMe || debt.closed || debt.dueAt == null) continue;
+      final outstanding = debtStatus(debt, asOf: current).outstandingPaise;
+      if (outstanding <= 0) continue;
+      final due = DateTime(debt.dueAt!.year, debt.dueAt!.month, debt.dueAt!.day,
+          defaultReminderHour);
+      final overdue = !due.isAfter(current);
+      final at = overdue
+          ? DateTime(current.year, current.month, current.day + 1,
+              defaultReminderHour)
+          : due;
+      result.add(PlannedNotification(
+        key: 'lend:${debt.id}:${debt.dueAt!.toIso8601String()}',
+        at: at,
+        title: overdue ? 'Money still to get back' : 'Money to get back',
+        body:
+            '${debt.name}: ${formatMoney(outstanding, reveal: true)}${overdue ? ' is overdue' : ' is due'}'
+            '${debt.counterparty.isEmpty ? '' : ' from ${debt.counterparty}'}.',
+        channel: ReminderChannel.bills,
+        payload: 'debt:${debt.id}',
+      ));
+    }
+    return result;
+  }
 
   LocalTask? taskById(String id) {
     for (final task in tasks) {
@@ -561,6 +629,16 @@ class LifePilotStore extends ChangeNotifier {
     return entry;
   }
 
+  /// Adds an already-constructed [entry] (with a pre-existing [id]) and
+  /// adjusts the linked account balance. Used by SMS and statement imports
+  /// so that running balances stay in step with imported transactions.
+  Future<void> addImportedEntry(LedgerEntry entry) async {
+    entries.add(entry);
+    await _changed();
+    _adjustAccountBalance(entry.accountId, entry.amountPaise,
+        isIncome: entry.isIncome);
+  }
+
   /// Subcategories used before in [category], most used first.
   List<String> subcategoriesOf(String category) {
     final counts = <String, int>{};
@@ -575,13 +653,84 @@ class LifePilotStore extends ChangeNotifier {
   Future<void> updateEntry(LedgerEntry updated) async {
     final index = entries.indexWhere((entry) => entry.id == updated.id);
     if (index < 0) throw StateError('That transaction no longer exists.');
+    final old = entries[index];
+    // Move any linked account balance from the old values to the new ones.
+    _adjustAccountBalance(old.accountId, old.amountPaise,
+        isIncome: !old.isIncome);
     entries[index] = updated;
+    _adjustAccountBalance(updated.accountId, updated.amountPaise,
+        isIncome: updated.isIncome);
     await _changed();
   }
 
   Future<void> deleteEntry(String id) async {
-    entries.removeWhere((entry) => entry.id == id);
+    final index = entries.indexWhere((entry) => entry.id == id);
+    if (index < 0) return;
+    final old = entries.removeAt(index);
+    _adjustAccountBalance(old.accountId, old.amountPaise,
+        isIncome: !old.isIncome);
     await _changed();
+  }
+
+  /// Applies the same correction to many past entries, then recalculates
+  /// account balances. Returns how many entries changed.
+  Future<int> bulkCorrectEntries({
+    required bool Function(LedgerEntry entry) where,
+    EntryKind? kind,
+    String? category,
+    String? paymentMethod,
+    String? accountId,
+    bool clearAccount = false,
+  }) async {
+    var changed = 0;
+    for (var i = 0; i < entries.length; i++) {
+      final entry = entries[i];
+      if (!where(entry)) continue;
+      entries[i] = entry.copyWith(
+        kind: kind,
+        category: category,
+        paymentMethod: paymentMethod,
+        accountId: accountId,
+        clearAccount: clearAccount,
+      );
+      changed++;
+    }
+    if (changed > 0) {
+      _recalculateBalances();
+      await _changed();
+    }
+    return changed;
+  }
+
+  /// Merges [duplicateIds] into [keepId], combining their notes, and
+  /// recalculates balances. Returns the kept entry, or null if it is gone.
+  Future<LedgerEntry?> mergeEntries(
+      String keepId, Iterable<String> duplicateIds) async {
+    final keepIndex = entries.indexWhere((entry) => entry.id == keepId);
+    if (keepIndex < 0) return null;
+    var keep = entries[keepIndex];
+    final remove = duplicateIds.toSet()..remove(keepId);
+    final notes = <String>[
+      if (keep.note.trim().isNotEmpty) keep.note.trim(),
+    ];
+    for (final entry in entries) {
+      if (!remove.contains(entry.id)) continue;
+      if (entry.note.trim().isNotEmpty && !notes.contains(entry.note.trim())) {
+        notes.add(entry.note.trim());
+      }
+      if (keep.merchant.trim().isEmpty && entry.merchant.trim().isNotEmpty) {
+        keep = keep.copyWith(merchant: entry.merchant.trim());
+      }
+      if (keep.accountId == null && entry.accountId != null) {
+        keep = keep.copyWith(accountId: entry.accountId);
+      }
+    }
+    entries[keepIndex] =
+        keep.copyWith(note: notes.join(' · '));
+    entries.removeWhere((entry) => remove.contains(entry.id));
+    _recalculateBalances();
+    await _changed();
+    return entries[keepIndex];
   }
 
   /// Adds imported entries, skipping ones that duplicate an existing record
@@ -1306,18 +1455,167 @@ class LifePilotStore extends ChangeNotifier {
     _accountBalances[accountId] = (_accountBalances[accountId]!) + delta;
   }
 
-  /// Matches a bank-reported balance to a tracked account by bank name or
-  /// account hint (last digits), and returns it, or null.
-  Account? _findAccountForBalance(BankBalance balance) {
-    final bankLower = balance.bank.toLowerCase();
+  /// Matches a bank (and an optional last-four hint) to a tracked account: by
+  /// the last four digits saved on the account or in its masked number, then
+  /// by the bank name, then by a hint in the account's name. Returns null when
+  /// nothing matches.
+  Account? accountForBank(String bank, {String? hint}) {
+    if (hint != null && hint.isNotEmpty) {
+      for (final account in accounts.where((item) => !item.archived)) {
+        final last4 = account.last4.isNotEmpty
+            ? account.last4
+            : _trailingDigits(account.accountNumberMasked);
+        if (last4.isNotEmpty && last4 == hint) return account;
+      }
+    }
+    final bankLower = bank.toLowerCase();
+    final bankWords =
+        bankLower.split(RegExp(r'\s+')).where((w) => w.length >= 3).toList();
     for (final account in accounts.where((item) => !item.archived)) {
       final nameLower = account.name.toLowerCase();
-      if (nameLower.contains(bankLower)) return account;
-      if (balance.accountHint != null) {
-        if (account.name.contains(balance.accountHint!)) return account;
+      // Direct containment either way.
+      if (nameLower.contains(bankLower) || bankLower.contains(nameLower)) {
+        return account;
+      }
+      final storedBank = account.bankName?.toLowerCase();
+      if (storedBank != null &&
+          storedBank.isNotEmpty &&
+          (storedBank == bankLower ||
+              storedBank.contains(bankLower) ||
+              bankLower.contains(storedBank))) {
+        return account;
+      }
+      // Any significant word from the bank name appearing in the account name.
+      if (bankWords.any(nameLower.contains)) {
+        return account;
+      }
+    }
+    if (hint != null && hint.isNotEmpty) {
+      for (final account in accounts.where((item) => !item.archived)) {
+        if (account.name.contains(hint)) return account;
       }
     }
     return null;
+  }
+
+  /// Matches a bank-reported balance to a tracked account.
+  Account? accountForBankBalance(BankBalance balance) =>
+      accountForBank(balance.bank, hint: balance.accountHint);
+
+  /// The account a bank-reported balance belongs to, creating a suggested
+  /// bank account when none matches so the balance and its transactions are
+  /// not left unlinked. A card's credit limit is not money held, so it does
+  /// not create an account.
+  Account? _accountForBalanceOrCreate(BankBalance balance) {
+    final existing = accountForBankBalance(balance);
+    if (existing != null) return existing;
+    if (balance.isLimit) return null;
+    final hint = balance.accountHint;
+    final hasHint = hint != null && hint.isNotEmpty;
+    final account = Account(
+      id: _newId(),
+      name: hasHint ? '${balance.bank} ••$hint' : balance.bank,
+      kind: AccountKind.bank,
+      last4: hasHint ? hint : '',
+      bankName: balance.bank,
+      accountNumberMasked: hasHint ? 'XXXX $hint' : null,
+      currentBalancePaise: balance.paise,
+      availableBalancePaise: balance.paise,
+      lastStatementBalancePaise: balance.paise,
+      lastUpdatedAt: balance.at,
+      lastSyncedAt: balance.at,
+      verificationStatus: hasHint ? 'matched' : 'unidentified',
+    );
+    accounts.add(account);
+    return account;
+  }
+
+  /// When the latest bank SMS or statement set [account]'s balance.
+  DateTime? lastSyncedFor(Account account) {
+    var latest = account.lastSyncedAt;
+    for (final balance in bankBalances) {
+      if (accountForBankBalance(balance)?.id != account.id) continue;
+      if (latest == null || balance.at.isAfter(latest)) latest = balance.at;
+    }
+    return latest;
+  }
+
+  /// The newest bank-reported balance for [account], if any.
+  BankBalance? bankBalanceFor(Account account) {
+    BankBalance? best;
+    for (final balance in bankBalances) {
+      if (accountForBankBalance(balance)?.id != account.id) continue;
+      if (best == null || balance.at.isAfter(best.at)) best = balance;
+    }
+    return best;
+  }
+
+  /// Sets the account to the bank's balance and remembers when. Older
+  /// reports are ignored so an out-of-order message cannot undo a newer one.
+  bool _applyBankBalance(Account account, BankBalance balance,
+      {bool force = false}) {
+    if (!force &&
+        account.lastSyncedAt != null &&
+        balance.at.isBefore(account.lastSyncedAt!)) {
+      return false;
+    }
+    _accountBalances[account.id] = balance.paise;
+    final index = accounts.indexWhere((item) => item.id == account.id);
+    if (index >= 0) {
+      accounts[index] = account.copyWith(lastSyncedAt: balance.at);
+    }
+    return true;
+  }
+
+  /// Accepts the bank's balance for the account it belongs to.
+  Future<void> adjustToBankBalance(BankBalance balance) async {
+    final account = accountForBankBalance(balance);
+    if (account != null) _applyBankBalance(account, balance, force: true);
+    ignoredBalanceKeys.remove(balance.key);
+    await _changed();
+  }
+
+  /// Applies a bank-reported balance to the matched account, updating the
+  /// running balance, last sync time, and verification status. Notifies
+  /// listeners so the UI refreshes immediately.
+  Future<void> applyBankBalanceReport(BankBalance balance,
+      {String? verificationStatus}) async {
+    final account = accountForBankBalance(balance);
+    if (account == null) return;
+    if (!balance.at.isAfter(account.lastUpdatedAt ?? DateTime(1970))) return;
+    final index = accounts.indexWhere((item) => item.id == account.id);
+    if (index < 0) return;
+    _accountBalances[account.id] = balance.paise;
+    accounts[index] = account.copyWith(
+      currentBalancePaise: balance.paise,
+      availableBalancePaise: balance.paise,
+      lastStatementBalancePaise: balance.paise,
+      lastUpdatedAt: balance.at,
+      lastSyncedAt: balance.at,
+      verificationStatus: verificationStatus ?? 'verified',
+    );
+    await _changed();
+  }
+
+  /// Leaves LifePilot's recorded balance alone and stops offering this
+  /// reported balance for adjustment.
+  Future<void> ignoreBankBalance(BankBalance balance) async {
+    ignoredBalanceKeys.add(balance.key);
+    await _changed();
+  }
+
+  /// Recomputes every account's running balance from its opening balance,
+  /// recorded entries and transfers. Used after correcting past entries.
+  Future<void> recalculateBalances() async {
+    _recalculateBalances();
+    await _changed();
+  }
+
+  void _recalculateBalances() {
+    for (final account in accounts) {
+      _accountBalances[account.id] =
+          accountBalance(account, entries, transfers);
+    }
   }
 
   /// Running balance for [accountId]: the last value set by opening balance,
@@ -1325,7 +1623,22 @@ class LifePilotStore extends ChangeNotifier {
   /// computing from opening balance plus recorded entries when none is set.
   int accountRunningBalance(String accountId) {
     if (_accountBalances.containsKey(accountId)) {
-      return _accountBalances[accountId]!;
+      final recorded = _accountBalances[accountId]!;
+      final account = accounts.firstWhere((item) => item.id == accountId);
+      // If no entries have adjusted this account yet (recorded balance still
+      // equals the opening balance) and a bank SMS reported a newer balance
+      // for a matched account, prefer the bank figure so the Accounts tab and
+      // Plan tab agree.
+      final hasEntries = entries.any((item) => item.accountId == accountId);
+      if (!hasEntries && recorded == account.openingBalancePaise) {
+        final bankBalance = bankBalanceFor(account);
+        if (bankBalance != null &&
+            (account.lastSyncedAt == null ||
+                bankBalance.at.isAfter(account.lastSyncedAt!))) {
+          return bankBalance.paise;
+        }
+      }
+      return recorded;
     }
     final account = accounts.firstWhere((item) => item.id == accountId);
     return accountBalance(account, entries, transfers);
@@ -1372,8 +1685,48 @@ class LifePilotStore extends ChangeNotifier {
     return transfer;
   }
 
+  /// Edits a transfer. Both accounts are moved back from the old values and
+  /// forward to the new ones, so the pair always stays in step.
+  Future<AccountTransfer> updateTransfer(
+    String id, {
+    required String fromAccountId,
+    required String toAccountId,
+    required int amountPaise,
+    DateTime? at,
+    String note = '',
+  }) async {
+    final index = transfers.indexWhere((item) => item.id == id);
+    if (index < 0) throw StateError('That transfer no longer exists.');
+    if (fromAccountId == toAccountId) {
+      throw ArgumentError('Choose two different accounts.');
+    }
+    if (amountPaise <= 0) throw ArgumentError('Enter an amount.');
+    final old = transfers[index];
+    final updated = old.copyWith(
+      fromAccountId: fromAccountId,
+      toAccountId: toAccountId,
+      amountPaise: amountPaise,
+      at: at ?? old.at,
+      note: note.trim(),
+    );
+    // Undo the old movement, then apply the new one.
+    _adjustAccountBalance(old.fromAccountId, old.amountPaise, isIncome: true);
+    _adjustAccountBalance(old.toAccountId, old.amountPaise, isIncome: false);
+    _adjustAccountBalance(updated.fromAccountId, updated.amountPaise,
+        isIncome: false);
+    _adjustAccountBalance(updated.toAccountId, updated.amountPaise,
+        isIncome: true);
+    transfers[index] = updated;
+    await _changed();
+    return updated;
+  }
+
   Future<void> deleteTransfer(String id) async {
-    transfers.removeWhere((item) => item.id == id);
+    final index = transfers.indexWhere((item) => item.id == id);
+    if (index < 0) return;
+    final old = transfers.removeAt(index);
+    _adjustAccountBalance(old.fromAccountId, old.amountPaise, isIncome: true);
+    _adjustAccountBalance(old.toAccountId, old.amountPaise, isIncome: false);
     await _changed();
   }
 
@@ -1544,10 +1897,38 @@ class LifePilotStore extends ChangeNotifier {
   /// remembered by fingerprint so it is never imported twice.
   Future<void> applySmsImport(SmsImport import) async {
     if (import.handled.isEmpty && import.balances.isEmpty) return;
+    // Link bank-reported balances to accounts first, creating a suggested
+    // account when the bank is not tracked yet, so the balance and the
+    // transactions from the same bank are not left unlinked.
+    for (final balance in import.balances.values) {
+      // Only a report newer than the last sync may change a balance, so an
+      // out-of-order or replayed message cannot undo a newer one.
+      final existingIndex =
+          bankBalances.indexWhere((item) => item.key == balance.key);
+      final olderThanStored = existingIndex >= 0 &&
+          balance.at.isBefore(bankBalances[existingIndex].at);
+      if (olderThanStored) continue;
+      if (existingIndex < 0) {
+        bankBalances.add(balance);
+      } else {
+        bankBalances[existingIndex] = balance;
+      }
+      if (ignoredBalanceKeys.contains(balance.key)) continue;
+      final account = _accountForBalanceOrCreate(balance);
+      if (account != null) _applyBankBalance(account, balance, force: true);
+    }
+    // Add the drafts, linking each to the account its bank balance created or
+    // matched so the transaction counts towards that account's balance.
     for (final draft in import.drafts) {
+      var entry = draft.entry;
+      if (entry.accountId == null) {
+        final bank = import.draftBanks[draft.sourceKey];
+        final account = bank == null ? null : accountForBank(bank);
+        if (account != null) entry = entry.copyWith(accountId: account.id);
+      }
       pending.add(PendingEntry(
         id: _newId(),
-        entry: draft.entry,
+        entry: entry,
         source: draft.source,
         createdAt: draft.createdAt,
         sourceKey: draft.sourceKey,
@@ -1555,6 +1936,7 @@ class LifePilotStore extends ChangeNotifier {
         warning: draft.warning,
         balancePaise: draft.balancePaise,
         autoPay: draft.autoPay,
+        billId: draft.billId,
       ));
     }
     for (final match in import.recurringMatches) {
@@ -1578,20 +1960,12 @@ class LifePilotStore extends ChangeNotifier {
             : 'Your bank shows ${formatMoney(match.amountPaise)}; the recurring entry expects ${formatMoney(expected)}. Edit the recurring entry if the amount has changed.',
       );
     }
-    for (final balance in import.balances.values) {
-      // Reconcile the running balance of the matching tracked account with
-      // what the bank SMS reports (the authoritative balance after the
-      // transaction).
-      final account = _findAccountForBalance(balance);
-      if (account != null) {
-        _accountBalances[account.id] = balance.paise;
-      }
-      final index = bankBalances.indexWhere((item) => item.key == balance.key);
-      if (index < 0) {
-        bankBalances.add(balance);
-      } else if (!balance.at.isBefore(bankBalances[index].at)) {
-        bankBalances[index] = balance;
-      }
+    for (final item in import.unrecognized) {
+      unrecognizedSms.removeWhere((existing) => existing.key == item.key);
+      unrecognizedSms.insert(0, item);
+    }
+    if (unrecognizedSms.length > 100) {
+      unrecognizedSms.removeRange(100, unrecognizedSms.length);
     }
     for (final confirmation in import.confirmations) {
       final index =
@@ -1653,6 +2027,7 @@ class LifePilotStore extends ChangeNotifier {
     double annualRatePercent = 0,
     int emiPaise = 0,
     String counterparty = '',
+    DateTime? dueAt,
   }) async {
     final debt = Debt(
       id: _newId(),
@@ -1663,6 +2038,7 @@ class LifePilotStore extends ChangeNotifier {
       annualRatePercent: annualRatePercent,
       emiPaise: emiPaise,
       counterparty: counterparty.trim(),
+      dueAt: dueAt == null ? null : dateOnly(dueAt),
     );
     debts.add(debt);
     await _changed();
@@ -1689,6 +2065,7 @@ class LifePilotStore extends ChangeNotifier {
     DateTime? at,
     String note = '',
     bool recordExpense = false,
+    bool recordIncome = false,
     String? accountId,
   }) async {
     final index = debts.indexWhere((item) => item.id == debtId);
@@ -1722,6 +2099,24 @@ class LifePilotStore extends ChangeNotifier {
         note: note.trim(),
         accountId: accountId,
       ));
+      _adjustAccountBalance(accountId, amountPaise, isIncome: false);
+    }
+    // Money lent coming back is an inflow, not income earned. It restores
+    // the balance of the account the repayment went into.
+    if (recordIncome && debt.owedToMe) {
+      entries.add(LedgerEntry(
+        id: _newId(),
+        kind: EntryKind.income,
+        amountPaise: amountPaise,
+        category: 'Loans',
+        title: 'Returned · ${debt.name}',
+        occurredAt: when,
+        note: note.trim().isEmpty
+            ? 'Interest-free lending returned'
+            : note.trim(),
+        accountId: accountId,
+      ));
+      _adjustAccountBalance(accountId, amountPaise, isIncome: true);
     }
     await _changed();
     return updated;
@@ -1956,14 +2351,55 @@ class LifePilotStore extends ChangeNotifier {
   }
 
   /// Saves a statement import: new drafts, the rows' keys so a re-import
-  /// skips them, and the closing balance under [balanceLabel] (usually the
-  /// account's name).
+  /// skips them, the closing balance under [balanceLabel] (usually the
+  /// account's name), and the column layout for that bank.
   Future<void> applyStatementImport(StatementImport import,
-      {String balanceLabel = 'Bank statement'}) async {
+      {String balanceLabel = 'Bank statement',
+      String? accountId,
+      String? bankName,
+      String? accountHint,
+      StatementMapping? mapping}) async {
+    // Resolve the target account: explicit choice > bank-name/hint match >
+    // auto-created suggested account. This keeps statement transactions and
+    // balances linked to the right account instead of left unlinked.
+    String? resolvedAccountId = accountId;
+    if (resolvedAccountId == null) {
+      final existing = accountForBank(bankName ?? '', hint: accountHint);
+      if (existing != null) {
+        resolvedAccountId = existing.id;
+      } else if (bankName != null && bankName.isNotEmpty) {
+        // Auto-create a suggested account so the balance and transactions are
+        // not left unlinked. A card's credit limit is not money held.
+        final hintDigits = accountHint ?? '';
+        final hasHint = hintDigits.isNotEmpty;
+        final newAccount = Account(
+          id: _newId(),
+          name: hasHint ? '$bankName ••$hintDigits' : bankName,
+          kind: AccountKind.bank,
+          last4: hintDigits,
+          bankName: bankName,
+          accountNumberMasked: hasHint ? 'XXXX $hintDigits' : null,
+          currentBalancePaise: import.closing?.paise,
+          availableBalancePaise: import.closing?.paise,
+          lastStatementBalancePaise: import.closing?.paise,
+          lastUpdatedAt: import.closing?.at,
+          lastSyncedAt: import.closing?.at,
+          verificationStatus: hasHint ? 'matched' : 'unidentified',
+        );
+        accounts.add(newAccount);
+        resolvedAccountId = newAccount.id;
+      }
+    }
+    // Link each draft to the resolved account so its balance impact lands
+    // on the correct account and it is not left unlinked.
     for (final draft in import.drafts) {
+      var entry = draft.entry;
+      if (entry.accountId == null && resolvedAccountId != null) {
+        entry = entry.copyWith(accountId: resolvedAccountId);
+      }
       pending.add(PendingEntry(
         id: _newId(),
-        entry: draft.entry,
+        entry: entry,
         source: draft.source,
         createdAt: draft.createdAt,
         sourceKey: draft.sourceKey,
@@ -1972,17 +2408,45 @@ class LifePilotStore extends ChangeNotifier {
       ));
     }
     seenSms.addAll(import.keys);
+    if (mapping != null) {
+      final saved = mapping.withBank(balanceLabel);
+      final index = statementMappings.indexWhere(
+          (item) => item.bank.toLowerCase() == saved.bank.toLowerCase());
+      if (index < 0) {
+        statementMappings.add(saved);
+      } else {
+        statementMappings[index] = saved;
+      }
+    }
     final closing = import.closing;
     if (closing != null) {
-      final balance =
-          BankBalance(bank: balanceLabel, paise: closing.paise, at: closing.at);
+      final balance = BankBalance(
+          bank: balanceLabel, paise: closing.paise, at: closing.at);
       final index = bankBalances.indexWhere((item) => item.key == balance.key);
       if (index < 0) {
         bankBalances.add(balance);
       } else if (!balance.at.isBefore(bankBalances[index].at)) {
         bankBalances[index] = balance;
       }
+      // Apply to the resolved account only when we have one.
+      if (resolvedAccountId != null && !ignoredBalanceKeys.contains(balance.key)) {
+        final account = accountById(resolvedAccountId);
+        if (account != null) _applyBankBalance(account, balance, force: true);
+      }
     }
+    await _changed();
+  }
+
+  /// Layout saved for [bank], if any.
+  StatementMapping? statementMappingFor(String bank) {
+    for (final mapping in statementMappings) {
+      if (mapping.bank.toLowerCase() == bank.toLowerCase()) return mapping;
+    }
+    return null;
+  }
+
+  Future<void> dismissUnrecognized(String key) async {
+    unrecognizedSms.removeWhere((item) => item.key == key);
     await _changed();
   }
 
@@ -2042,6 +2506,7 @@ class LifePilotStore extends ChangeNotifier {
       accountId: values.accountId,
       receiptPath: values.receiptPath,
       source: draft.source,
+      billId: draft.billId ?? values.billId,
     );
     entries.add(entry);
     await _changed();
@@ -2060,12 +2525,62 @@ class LifePilotStore extends ChangeNotifier {
         _accountBalances[accountId] = current + delta;
       }
     }
+    // If the draft was matched to an existing bill (e.g. a bill payment SMS),
+    // mark the bill as paid. recordExpense is false because the entry above
+    // already records the expense — we must not count it twice.
+    if (draft.billId != null && draft.entry.kind == EntryKind.expense) {
+      await billRepository.markBillPaid(
+        draft.billId!,
+        amountPaise: draft.entry.amountPaise,
+        paidAt: draft.entry.occurredAt,
+        recordExpense: false,
+        paymentMethod: draft.entry.paymentMethod,
+      );
+    }
     return entry;
   }
 
   Future<void> dismissPending(String id) async {
     pending.removeWhere((item) => item.id == id);
     await _changed();
+  }
+
+  /// Reverses [entryId] by recording an offsetting entry of the opposite
+  /// kind on the same account, linked via [refundLinkId]. The original entry
+  /// is preserved in history; the reversal offsets its balance impact.
+  /// Returns the reversal entry, or null if the original is not found.
+  Future<LedgerEntry?> reverseEntry(String entryId) async {
+    final index = entries.indexWhere((item) => item.id == entryId);
+    if (index < 0) return null;
+    final original = entries[index];
+    final reversedKind =
+        original.isIncome ? EntryKind.expense : EntryKind.income;
+    final reversal = LedgerEntry(
+      id: _newId(),
+      kind: reversedKind,
+      amountPaise: original.amountPaise,
+      category: original.category,
+      title: 'Reversal · ${original.title}',
+      occurredAt: now(),
+      paymentMethod: original.paymentMethod,
+      merchant: original.merchant,
+      subcategory: original.subcategory,
+      accountId: original.accountId,
+      receiptPath: original.receiptPath,
+      source: 'reversal',
+      sourceReference: 'reverse:${original.id}',
+      refundLinkId: original.id,
+      validationStatus: ValidationStatus.verified,
+      confidenceScore: 1.0,
+    );
+    entries.add(reversal);
+    await _changed();
+    _adjustAccountBalance(
+      reversal.accountId,
+      reversal.amountPaise,
+      isIncome: reversal.isIncome,
+    );
+    return reversal;
   }
 
   // ---------------------------------------------------------------------------
@@ -2156,9 +2671,14 @@ class LifePilotStore extends ChangeNotifier {
         'habits': habits.map((item) => item.toJson()).toList(),
         'payees': payees.map((item) => item.toJson()).toList(),
         'suspiciousSms': suspiciousSms.map((item) => item.toJson()).toList(),
+        'unrecognizedSms': unrecognizedSms.map((item) => item.toJson()).toList(),
         'categoryRules': categoryRules.map((item) => item.toJson()).toList(),
+        'statementMappings':
+            statementMappings.map((item) => item.toJson()).toList(),
+        'ignoredBalanceKeys': ignoredBalanceKeys.toList(),
         'seenSms': seenSms.toList(),
         'bankBalances': bankBalances.map((item) => item.toJson()).toList(),
+        'accountBalances': _accountBalances,
         'dismissedSuggestions': dismissedSuggestions.toList(),
         'debts': debts.map((item) => item.toJson()).toList(),
         'investments': investments.map((item) => item.toJson()).toList(),

@@ -113,20 +113,26 @@ class _FormSheet extends StatelessWidget {
             EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
         child: Form(
           key: formKey,
-          child: ListView(
-            shrinkWrap: true,
+          // A plain column (not a lazy ListView) so every field, including the
+          // save button, is built even when the sheet is taller than the
+          // screen; the sheet scrolls to reach them.
+          child: SingleChildScrollView(
             padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
-            children: [
-              Text(title, style: Theme.of(context).textTheme.headlineSmall),
-              if (subtitle != null) ...[
-                const SizedBox(height: 4),
-                Text(subtitle!,
-                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                        color: Theme.of(context).colorScheme.onSurfaceVariant)),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(title, style: Theme.of(context).textTheme.headlineSmall),
+                if (subtitle != null) ...[
+                  const SizedBox(height: 4),
+                  Text(subtitle!,
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                          color:
+                              Theme.of(context).colorScheme.onSurfaceVariant)),
+                ],
+                const SizedBox(height: 20),
+                ...children,
               ],
-              const SizedBox(height: 20),
-              ...children,
-            ],
+            ),
           ),
         ),
       );
@@ -326,6 +332,7 @@ class _EntryFormState extends State<_EntryForm> {
   bool _saving = false;
   bool _showDetails = false;
   String? _error;
+  TransactionClassification _classification = TransactionClassification.other;
 
   bool get _isExpense => _kind == EntryKind.expense;
   bool get _editing => widget.entry != null;
@@ -347,11 +354,15 @@ class _EntryFormState extends State<_EntryForm> {
       _accountId = widget.store.accountById(entry.accountId)?.id;
       _receiptPath = entry.receiptPath;
       _categoryChosen = true;
+      _classification = entry.classification;
       _showDetails = entry.merchant.isNotEmpty ||
           entry.note.isNotEmpty ||
           entry.subcategory.isNotEmpty;
     } else {
       _category = _defaultCategory(_kind);
+      _classification = _kind == EntryKind.income
+          ? TransactionClassification.income
+          : TransactionClassification.expense;
     }
   }
 
@@ -472,6 +483,30 @@ class _EntryFormState extends State<_EntryForm> {
     return picks;
   }
 
+  List<TransactionClassification> get _classificationChoices {
+    if (_isExpense) {
+      return [
+        TransactionClassification.expense,
+        TransactionClassification.investment,
+        TransactionClassification.refund,
+        TransactionClassification.transfer,
+        TransactionClassification.bills,
+        TransactionClassification.shopping,
+        TransactionClassification.food,
+        TransactionClassification.debtPayment,
+        TransactionClassification.cashWithdrawal,
+        TransactionClassification.other,
+      ];
+    }
+    return [
+      TransactionClassification.income,
+      TransactionClassification.receivedMoney,
+      TransactionClassification.loanReceived,
+      TransactionClassification.investment,
+      TransactionClassification.other,
+    ];
+  }
+
   @override
   Widget build(BuildContext context) {
     final categories = widget.store.categories;
@@ -534,6 +569,22 @@ class _EntryFormState extends State<_EntryForm> {
               },
             ),
           ],
+        ),
+        _gap,
+        // Financial classification (separate from debit/credit direction).
+        Text('Transaction type', style: Theme.of(context).textTheme.labelLarge),
+        const SizedBox(height: 6),
+        Wrap(
+          spacing: 8,
+          runSpacing: 4,
+          children: _classificationChoices.map((item) {
+            final selected = _classification == item;
+            return ChoiceChip(
+              label: Text(item.label),
+              selected: selected,
+              onSelected: (_) => setState(() => _classification = item),
+            );
+          }).toList(),
         ),
         _gap,
         TextFormField(
@@ -744,6 +795,11 @@ class _EntryFormState extends State<_EntryForm> {
           clearAccount: draft.accountId == null,
           receiptPath: draft.receiptPath,
           clearReceipt: draft.receiptPath == null,
+          classification: _classification,
+          // Preserve original values on first manual correction.
+          originalKind: widget.entry!.originalKind ?? widget.entry!.kind,
+          originalCategory:
+              widget.entry!.originalCategory ?? widget.entry!.category,
         ));
         if (previousReceipt != null && previousReceipt != draft.receiptPath) {
           await deleteReceiptFile(previousReceipt);

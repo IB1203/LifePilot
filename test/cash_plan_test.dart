@@ -251,6 +251,51 @@ void main() {
               now: _now),
           isNull);
     });
+
+    test('income recorded only this month still gives a plan', () {
+      final plan = salaryPlan(
+        entries: [
+          LedgerEntry(
+            id: 'salary',
+            kind: EntryKind.income,
+            amountPaise: 2256700,
+            category: 'Salary',
+            title: 'Salary',
+            occurredAt: DateTime(2026, 11, 1),
+          ),
+        ],
+        rules: const [],
+        bills: const [],
+        budgets: const [],
+        goals: const [],
+        now: _now,
+      );
+      expect(plan, isNotNull, reason: 'a first salary must not read as none');
+      expect(plan!.incomePaise, 2256700);
+      expect(plan.incomeBasis, contains('this month'));
+    });
+  });
+
+  group('cash-flow forecast', () {
+    test('reports the confirmed start and the flows it schedules', () {
+      final forecast = forecastCash(
+        startPaise: 1000000,
+        entries: const [],
+        bills: [_bill('Internet', 800, DateTime(2026, 11, 20))],
+        rules: [
+          _rule('Salary', 60000, DateTime(2026, 11, 30),
+              kind: EntryKind.income, category: 'Salary'),
+        ],
+        now: _now,
+        days: 30,
+      );
+      expect(forecast.startKnown, isTrue);
+      expect(forecast.startPaise, 1000000);
+      expect(forecast.scheduledIncomePaise, 6000000);
+      expect(forecast.scheduledExpensePaise, 80000);
+      expect(forecast.endPaise,
+          1000000 + 6000000 - 80000, reason: 'no day-to-day spending recorded');
+    });
   });
 
   testWidgets('plan tab shows forecast, calendar, plan and subscriptions',

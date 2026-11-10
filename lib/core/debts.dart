@@ -67,6 +67,7 @@ class Debt {
     this.counterparty = '',
     this.payments = const [],
     this.closed = false,
+    this.dueAt,
   });
 
   final String id;
@@ -90,8 +91,14 @@ class Debt {
   final List<DebtPayment> payments;
   final bool closed;
 
+  /// When money lent is expected back. Used for overdue reminders.
+  final DateTime? dueAt;
+
   /// Money someone owes the user, rather than the other way round.
   bool get owedToMe => kind == DebtKind.lent;
+
+  /// Interest-free lending: money lent to someone with no interest charged.
+  bool get isInterestFreeLending => kind == DebtKind.lent && annualRatePercent <= 0;
 
   Debt copyWith({
     String? name,
@@ -103,6 +110,8 @@ class Debt {
     String? counterparty,
     List<DebtPayment>? payments,
     bool? closed,
+    DateTime? dueAt,
+    bool clearDueDate = false,
   }) =>
       Debt(
         id: id,
@@ -115,6 +124,7 @@ class Debt {
         counterparty: counterparty ?? this.counterparty,
         payments: payments ?? this.payments,
         closed: closed ?? this.closed,
+        dueAt: clearDueDate ? null : dueAt ?? this.dueAt,
       );
 
   Map<String, Object?> toJson() => {
@@ -128,6 +138,7 @@ class Debt {
         if (counterparty.isNotEmpty) 'counterparty': counterparty,
         'payments': payments.map((item) => item.toJson()).toList(),
         if (closed) 'closed': true,
+        if (dueAt != null) 'dueAt': dueAt!.toIso8601String(),
       };
 
   factory Debt.fromJson(Map<String, dynamic> json) {
@@ -151,8 +162,34 @@ class Debt {
           DebtPayment.fromJson((item as Map).cast<String, dynamic>()),
       ],
       closed: json['closed'] as bool? ?? false,
+      dueAt: json['dueAt'] is String
+          ? DateTime.tryParse(json['dueAt'] as String)
+          : null,
     );
   }
+}
+
+/// Interest-free loans that are still outstanding past their due date.
+List<({Debt debt, int outstandingPaise, int daysOverdue})> overdueLending(
+  Iterable<Debt> debts,
+  DateTime now,
+) {
+  final today = DateTime(now.year, now.month, now.day);
+  final result = <({Debt debt, int outstandingPaise, int daysOverdue})>[];
+  for (final debt in debts) {
+    if (!debt.owedToMe || debt.closed || debt.dueAt == null) continue;
+    final outstanding = debtStatus(debt, asOf: now).outstandingPaise;
+    if (outstanding <= 0) continue;
+    final due = DateTime(debt.dueAt!.year, debt.dueAt!.month, debt.dueAt!.day);
+    if (!due.isBefore(today)) continue;
+    result.add((
+      debt: debt,
+      outstandingPaise: outstanding,
+      daysOverdue: today.difference(due).inDays,
+    ));
+  }
+  result.sort((a, b) => b.daysOverdue.compareTo(a.daysOverdue));
+  return result;
 }
 
 // ---------------------------------------------------------------------------

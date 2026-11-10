@@ -28,6 +28,25 @@ int accountBalance(
   return balance;
 }
 
+/// Canonical dedup key for a pending draft: amount + date + normalized
+/// merchant + direction. Both SMS and statement imports compute the same key
+/// for the same real transaction, so cross-source duplicates are detected.
+String dedupKeyForEntry({
+  required EntryKind kind,
+  required int amountPaise,
+  required DateTime occurredAt,
+  required String merchant,
+}) {
+  final norm = merchant
+      .toLowerCase()
+      .replaceAll(RegExp(r'[^a-z0-9]+'), ' ')
+      .replaceAll(RegExp(r'\s+'), ' ')
+      .trim();
+  final dateStr = DateTime(occurredAt.year, occurredAt.month, occurredAt.day)
+      .toIso8601String();
+  return 'dedup:${kind.name}|$amountPaise|$dateStr|$norm';
+}
+
 // ---------------------------------------------------------------------------
 // Habits
 

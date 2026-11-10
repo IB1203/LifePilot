@@ -52,12 +52,15 @@ class MoneyGlanceSection extends StatelessWidget {
         budgetWarnings.add(budget);
       }
     }
-    final safe = safeToSpendToday(
+    final debt = debtTotals(store.debts, asOf: now);
+    final safe = safeToSpend(
       entries: store.entries,
       budgets: store.budgets,
       bills: store.bills,
       rules: store.recurring,
       now: now,
+      availablePaise: available?.paise,
+      monthlyEmiPaise: debt.monthlyPaise,
     );
     final forecast = monthForecast(
         entries: store.entries,
@@ -67,7 +70,6 @@ class MoneyGlanceSection extends StatelessWidget {
     final budgets = monthlyBudgetTotals(store.budgets, store.entries, now);
     final overBudget =
         budgets.limitPaise > 0 && forecast.projectedPaise > budgets.limitPaise;
-    final debt = debtTotals(store.debts, asOf: now);
     final worth = netWorth(
       accounts: store.accounts,
       entries: store.entries,
@@ -263,9 +265,15 @@ class MoneyGlanceSection extends StatelessWidget {
                       Expanded(
                           child: Text('Safe to spend today',
                               style: theme.textTheme.labelLarge)),
-                      Text(formatMoney(safe.paise),
+                      Text(formatMoney(safe.perDayPaise),
                           style: theme.textTheme.titleMedium
                               ?.copyWith(fontWeight: FontWeight.w700)),
+                      IconButton(
+                        tooltip: 'How this is calculated',
+                        visualDensity: VisualDensity.compact,
+                        icon: const Icon(Icons.info_outline, size: 18),
+                        onPressed: () => showSafeToSpend(context, safe),
+                      ),
                     ],
                   ),
                   Text(safe.basis, style: muted),
@@ -290,8 +298,9 @@ class MoneyGlanceSection extends StatelessWidget {
                   ],
                 ),
                 Text(
-                  '${formatMoney(forecast.dailyPacePaise)}/day so far for ${forecast.daysLeft} more day${forecast.daysLeft == 1 ? '' : 's'}'
-                  '${forecast.committedPaise > 0 ? ', plus ${formatMoney(forecast.committedPaise)} of bills and recurring payments' : ''}.',
+                  '${formatMoney(forecast.spentPaise)} spent so far + '
+                  '${formatMoney(forecast.dailyPacePaise)}/day × ${forecast.daysLeft} day${forecast.daysLeft == 1 ? '' : 's'} left'
+                  '${forecast.committedPaise > 0 ? ' + ${formatMoney(forecast.committedPaise)} of bills and recurring payments' : ''}.',
                   style: muted,
                 ),
                 if (worth != null) ...[
@@ -328,6 +337,79 @@ class MoneyGlanceSection extends StatelessWidget {
     );
   }
 }
+
+Future<void> showSafeToSpend(BuildContext context, SafeToSpend safe) =>
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (sheetContext) {
+        final theme = Theme.of(sheetContext);
+        final rows = <(String, int)>[
+          (safe.fundsLabel, safe.fundsPaise),
+          if (safe.spentPaise > 0) ('Spent this month', -safe.spentPaise),
+          if (safe.committedPaise > 0)
+            ('Bills and recurring payments still due', -safe.committedPaise),
+          if (safe.emiPaise > 0) ('Loan EMIs this month', -safe.emiPaise),
+          if (safe.bufferPaise > 0) ('Buffer kept back', -safe.bufferPaise),
+        ];
+        return SafeArea(
+          child: ListView(
+            shrinkWrap: true,
+            padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+            children: [
+              Text('Safe to spend today', style: theme.textTheme.titleLarge),
+              const SizedBox(height: 4),
+              Text(
+                'How the ${formatMoney(safe.perDayPaise)} a day is worked out.',
+                style: theme.textTheme.bodySmall,
+              ),
+              const SizedBox(height: 12),
+              for (final (label, amount) in rows)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: Row(
+                    children: [
+                      Expanded(child: Text(label)),
+                      Text(
+                        amount < 0
+                            ? '− ${formatMoney(-amount)}'
+                            : formatMoney(amount),
+                        style: theme.textTheme.titleSmall,
+                      ),
+                    ],
+                  ),
+                ),
+              const Divider(),
+              Row(
+                children: [
+                  Expanded(child: Text('Left for the month',
+                      style: theme.textTheme.titleSmall)),
+                  Text(formatMoney(safe.remainingPaise),
+                      style: theme.textTheme.titleSmall
+                          ?.copyWith(fontWeight: FontWeight.w700)),
+                ],
+              ),
+              Row(
+                children: [
+                  Expanded(
+                      child: Text('÷ ${safe.days} day${safe.days == 1 ? '' : 's'} left including today')),
+                  Text(formatMoney(safe.perDayPaise),
+                      style: theme.textTheme.titleSmall
+                          ?.copyWith(fontWeight: FontWeight.w700)),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Text(
+                safe.basis,
+                style: theme.textTheme.bodySmall
+                    ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+              ),
+            ],
+          ),
+        );
+      },
+    );
 
 Future<void> showHealthScore(BuildContext context, HealthScore? health) =>
     showModalBottomSheet<void>(

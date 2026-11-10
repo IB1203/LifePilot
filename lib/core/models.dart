@@ -36,6 +36,14 @@ class LedgerEntry {
     this.accountId,
     this.receiptPath,
     this.source,
+    this.sourceType,
+    this.sourceReference,
+    this.classification = TransactionClassification.other,
+    this.validationStatus = ValidationStatus.unverified,
+    this.confidenceScore = 0.0,
+    this.originalKind,
+    this.originalCategory,
+    this.refundLinkId,
   });
 
   final String id;
@@ -64,6 +72,32 @@ class LedgerEntry {
   /// `upi`, `assistant`, `import`.
   final String? source;
 
+  /// More specific source type for bank intelligence: `sms`, `statement`,
+  /// `manual`, `csv_import`, `api`.
+  final String? sourceType;
+
+  /// Reference from the source system: SMS fingerprint, statement row key,
+  /// UPI reference, UTR, etc. Used for duplicate detection across sources.
+  final String? sourceReference;
+
+  /// Financial classification, separate from direction (income/expense).
+  final TransactionClassification classification;
+
+  /// Validation status from balance reconciliation.
+  final ValidationStatus validationStatus;
+
+  /// Confidence score from 0.0 to 1.0.
+  final double confidenceScore;
+
+  /// Original direction before any manual correction.
+  final EntryKind? originalKind;
+
+  /// Original category before any manual correction.
+  final String? originalCategory;
+
+  /// ID of the linked refund/original transaction, if any.
+  final String? refundLinkId;
+
   bool get isIncome => kind == EntryKind.income;
 
   LedgerEntry copyWith({
@@ -80,6 +114,14 @@ class LedgerEntry {
     bool clearAccount = false,
     String? receiptPath,
     bool clearReceipt = false,
+    TransactionClassification? classification,
+    ValidationStatus? validationStatus,
+    double? confidenceScore,
+    EntryKind? originalKind,
+    String? originalCategory,
+    String? refundLinkId,
+    String? sourceType,
+    String? sourceReference,
   }) =>
       LedgerEntry(
         id: id,
@@ -96,6 +138,14 @@ class LedgerEntry {
         accountId: clearAccount ? null : accountId ?? this.accountId,
         receiptPath: clearReceipt ? null : receiptPath ?? this.receiptPath,
         source: source,
+        sourceType: sourceType ?? this.sourceType,
+        sourceReference: sourceReference ?? this.sourceReference,
+        classification: classification ?? this.classification,
+        validationStatus: validationStatus ?? this.validationStatus,
+        confidenceScore: confidenceScore ?? this.confidenceScore,
+        originalKind: originalKind ?? this.originalKind,
+        originalCategory: originalCategory ?? this.originalCategory,
+        refundLinkId: refundLinkId ?? this.refundLinkId,
       );
 
   Map<String, Object?> toJson() => {
@@ -113,6 +163,16 @@ class LedgerEntry {
         if (accountId != null) 'accountId': accountId,
         if (receiptPath != null) 'receiptPath': receiptPath,
         if (source != null) 'source': source,
+        if (sourceType != null && sourceType!.isNotEmpty)
+          'sourceType': sourceType,
+        if (sourceReference != null && sourceReference!.isNotEmpty)
+          'sourceReference': sourceReference,
+        'classification': classification.name,
+        'validationStatus': validationStatus.name,
+        'confidenceScore': confidenceScore,
+        if (originalKind != null) 'originalKind': originalKind!.name,
+        if (originalCategory != null) 'originalCategory': originalCategory,
+        if (refundLinkId != null) 'refundLinkId': refundLinkId,
       };
 
   factory LedgerEntry.fromJson(Map<String, dynamic> json) {
@@ -137,8 +197,152 @@ class LedgerEntry {
       accountId: json['accountId'] as String?,
       receiptPath: json['receiptPath'] as String?,
       source: json['source'] as String?,
+      sourceType: json['sourceType'] as String?,
+      sourceReference: json['sourceReference'] as String?,
+      classification: TransactionClassification.values.byName(
+        json['classification'] as String? ?? 'other',
+      ),
+      validationStatus: ValidationStatus.values.byName(
+        json['validationStatus'] as String? ?? 'unverified',
+      ),
+      confidenceScore: (json['confidenceScore'] as num?)?.toDouble() ?? 0.0,
+      originalKind: EntryKind.values.byName(
+        json['originalKind'] as String? ?? json['kind'] as String,
+      ),
+      originalCategory: json['originalCategory'] as String?,
+      refundLinkId: json['refundLinkId'] as String?,
     );
   }
+}
+
+/// Validation status for a transaction based on balance reconciliation.
+enum ValidationStatus {
+  /// Amount and balance movement match exactly.
+  verified,
+  /// Direction is identifiable but some extracted information is uncertain.
+  partiallyVerified,
+  /// Information is contradictory or incomplete.
+  needsReview,
+  /// Insufficient information to determine direction.
+  unverified,
+}
+
+/// Financial classification of a transaction, separate from direction.
+enum TransactionClassification {
+  income,
+  expense,
+  investment,
+  refund,
+  transfer,
+  receivedMoney,
+  loanReceived,
+  cashWithdrawal,
+  bills,
+  shopping,
+  food,
+  debtPayment,
+  other;
+
+  /// Human-readable label for the classification.
+  String get label {
+    switch (this) {
+      case TransactionClassification.income:
+        return 'Income';
+      case TransactionClassification.expense:
+        return 'Expense';
+      case TransactionClassification.investment:
+        return 'Investment';
+      case TransactionClassification.refund:
+        return 'Refund';
+      case TransactionClassification.transfer:
+        return 'Internal Transfer';
+      case TransactionClassification.receivedMoney:
+        return 'Money Received';
+      case TransactionClassification.loanReceived:
+        return 'Loan Received';
+      case TransactionClassification.cashWithdrawal:
+        return 'Cash Withdrawal';
+      case TransactionClassification.bills:
+        return 'Bills';
+      case TransactionClassification.shopping:
+        return 'Shopping';
+      case TransactionClassification.food:
+        return 'Food';
+      case TransactionClassification.debtPayment:
+        return 'Loan Repayment';
+      case TransactionClassification.other:
+        return 'Other';
+    }
+  }
+}
+
+/// Confidence and validation metadata for a transaction.
+class TransactionIntelligence {
+  const TransactionIntelligence({
+    this.validationStatus = ValidationStatus.unverified,
+    this.confidenceScore = 0.0,
+    this.classification = TransactionClassification.other,
+    this.balanceValidated = false,
+    this.expectedBalance,
+    this.actualBalance,
+    this.balanceDifference,
+    this.originalKind,
+    this.originalCategory,
+    this.refundLinkId,
+    this.columnDirection,
+    this.balanceDirection,
+  });
+
+  /// Whether the balance movement validates the direction.
+  final ValidationStatus validationStatus;
+
+  /// Confidence score from 0.0 to 1.0.
+  final double confidenceScore;
+
+  /// Financial classification, separate from direction.
+  final TransactionClassification classification;
+
+  /// Whether balance reconciliation was performed.
+  final bool balanceValidated;
+
+  /// Expected balance after this transaction (Previous + Credit - Debit).
+  final int? expectedBalance;
+
+  /// Actual balance from the statement.
+  final int? actualBalance;
+
+  /// Difference between expected and actual balance.
+  final int? balanceDifference;
+
+  /// Original direction before any manual correction.
+  final EntryKind? originalKind;
+
+  /// Original category before any manual correction.
+  final String? originalCategory;
+
+  /// ID of the linked refund/original transaction, if any.
+  final String? refundLinkId;
+
+  /// Direction from DR/CR columns (may be reversed).
+  final EntryKind? columnDirection;
+
+  /// Direction from balance change analysis.
+  final EntryKind? balanceDirection;
+
+  Map<String, Object?> toJson() => {
+        'validationStatus': validationStatus.name,
+        'confidenceScore': confidenceScore,
+        'classification': classification.name,
+        'balanceValidated': balanceValidated,
+        if (expectedBalance != null) 'expectedBalance': expectedBalance,
+        if (actualBalance != null) 'actualBalance': actualBalance,
+        if (balanceDifference != null) 'balanceDifference': balanceDifference,
+        if (originalKind != null) 'originalKind': originalKind!.name,
+        if (originalCategory != null) 'originalCategory': originalCategory,
+        if (refundLinkId != null) 'refundLinkId': refundLinkId,
+        if (columnDirection != null) 'columnDirection': columnDirection!.name,
+        if (balanceDirection != null) 'balanceDirection': balanceDirection!.name,
+      };
 }
 
 enum BudgetPeriod { monthly, weekly }
@@ -1365,6 +1569,19 @@ class Account {
     required this.kind,
     this.openingBalancePaise = 0,
     this.archived = false,
+    this.last4 = '',
+    this.lastSyncedAt,
+    this.bankName,
+    this.accountHolder,
+    this.accountNumberMasked,
+    this.accountNumberHash,
+    this.ifscCode,
+    this.accountType,
+    this.currentBalancePaise,
+    this.availableBalancePaise,
+    this.lastStatementBalancePaise,
+    this.lastUpdatedAt,
+    this.verificationStatus = 'unidentified',
   });
 
   final String id;
@@ -1375,11 +1592,73 @@ class Account {
   final int openingBalancePaise;
   final bool archived;
 
+  /// Last four digits of the account or card number, used to match bank SMS
+  /// and statement balances to this account. Empty when not set.
+  final String last4;
+
+  /// When a bank SMS or statement last set this account's balance.
+  final DateTime? lastSyncedAt;
+
+  /// A card's rules are inverted: a rising outstanding balance is spending.
+  bool get isCard => kind == AccountKind.card;
+
+  // ---------------------------------------------------------------------------
+  // Bank identification (Smart Bank Intelligence)
+
+  /// Official bank name, e.g. "Bank of Baroda", "SBI", "HDFC Bank".
+  final String? bankName;
+
+  /// Account holder name as printed on the statement.
+  final String? accountHolder;
+
+  /// Masked account number, e.g. "XXXX XXXX 2596".
+  final String? accountNumberMasked;
+
+  /// Hash of the full account number for duplicate detection without storing
+  /// the raw number.
+  final String? accountNumberHash;
+
+  /// IFSC code, e.g. "BARB0XXX".
+  final String? ifscCode;
+
+  /// Account type: savings, current, salary, etc.
+  final String? accountType;
+
+  /// Current balance per the bank (from SMS or statement available balance).
+  final int? currentBalancePaise;
+
+  /// Available balance per the bank (may differ from current due to holds).
+  final int? availableBalancePaise;
+
+  /// Last statement closing balance.
+  final int? lastStatementBalancePaise;
+
+  /// When the bank-reported balance was last updated.
+  final DateTime? lastUpdatedAt;
+
+  /// Verification status: unidentified, matched, verified, mismatched.
+  final String verificationStatus;
+
   Account copyWith({
     String? name,
     AccountKind? kind,
     int? openingBalancePaise,
     bool? archived,
+    String? last4,
+    DateTime? lastSyncedAt,
+    bool clearLastSynced = false,
+    String? bankName,
+    String? accountHolder,
+    String? accountNumberMasked,
+    String? accountNumberHash,
+    String? ifscCode,
+    String? accountType,
+    int? currentBalancePaise,
+    int? availableBalancePaise,
+    int? lastStatementBalancePaise,
+    DateTime? lastUpdatedAt,
+    String? verificationStatus,
+    bool clearBankInfo = false,
   }) =>
       Account(
         id: id,
@@ -1387,6 +1666,20 @@ class Account {
         kind: kind ?? this.kind,
         openingBalancePaise: openingBalancePaise ?? this.openingBalancePaise,
         archived: archived ?? this.archived,
+        last4: last4 ?? this.last4,
+        lastSyncedAt:
+            clearLastSynced ? null : lastSyncedAt ?? this.lastSyncedAt,
+        bankName: clearBankInfo ? null : bankName ?? this.bankName,
+        accountHolder: clearBankInfo ? null : accountHolder ?? this.accountHolder,
+        accountNumberMasked: clearBankInfo ? null : accountNumberMasked ?? this.accountNumberMasked,
+        accountNumberHash: clearBankInfo ? null : accountNumberHash ?? this.accountNumberHash,
+        ifscCode: clearBankInfo ? null : ifscCode ?? this.ifscCode,
+        accountType: clearBankInfo ? null : accountType ?? this.accountType,
+        currentBalancePaise: currentBalancePaise ?? this.currentBalancePaise,
+        availableBalancePaise: availableBalancePaise ?? this.availableBalancePaise,
+        lastStatementBalancePaise: lastStatementBalancePaise ?? this.lastStatementBalancePaise,
+        lastUpdatedAt: lastUpdatedAt ?? this.lastUpdatedAt,
+        verificationStatus: verificationStatus ?? this.verificationStatus,
       );
 
   Map<String, Object?> toJson() => {
@@ -1395,6 +1688,30 @@ class Account {
         'kind': kind.name,
         'openingBalancePaise': openingBalancePaise,
         'archived': archived,
+        if (last4.isNotEmpty) 'last4': last4,
+        if (lastSyncedAt != null)
+          'lastSyncedAt': lastSyncedAt!.toIso8601String(),
+        if (bankName != null && bankName!.isNotEmpty) 'bankName': bankName,
+        if (accountHolder != null && accountHolder!.isNotEmpty)
+          'accountHolder': accountHolder,
+        if (accountNumberMasked != null &&
+            accountNumberMasked!.isNotEmpty)
+          'accountNumberMasked': accountNumberMasked,
+        if (accountNumberHash != null && accountNumberHash!.isNotEmpty)
+          'accountNumberHash': accountNumberHash,
+        if (ifscCode != null && ifscCode!.isNotEmpty) 'ifscCode': ifscCode,
+        if (accountType != null && accountType!.isNotEmpty)
+          'accountType': accountType,
+        if (currentBalancePaise != null)
+          'currentBalancePaise': currentBalancePaise,
+        if (availableBalancePaise != null)
+          'availableBalancePaise': availableBalancePaise,
+        if (lastStatementBalancePaise != null)
+          'lastStatementBalancePaise': lastStatementBalancePaise,
+        if (lastUpdatedAt != null)
+          'lastUpdatedAt': lastUpdatedAt!.toIso8601String(),
+        if (verificationStatus.isNotEmpty)
+          'verificationStatus': verificationStatus,
       };
 
   factory Account.fromJson(Map<String, dynamic> json) {
@@ -1402,12 +1719,33 @@ class Account {
     if (name.trim().isEmpty) {
       throw const FormatException('Invalid account in backup.');
     }
+    final digits =
+        (json['last4'] as String? ?? '').replaceAll(RegExp(r'\D'), '');
+    final storedSync = json['lastSyncedAt'];
     return Account(
       id: json['id'] as String,
       name: name,
       kind: _enum(AccountKind.values, json['kind'], AccountKind.other),
       openingBalancePaise: json['openingBalancePaise'] as int? ?? 0,
       archived: json['archived'] as bool? ?? false,
+      last4: digits.length > 4 ? digits.substring(digits.length - 4) : digits,
+      lastSyncedAt: storedSync is String && storedSync.isNotEmpty
+          ? DateTime.tryParse(storedSync)
+          : null,
+      bankName: json['bankName'] as String?,
+      accountHolder: json['accountHolder'] as String?,
+      accountNumberMasked: json['accountNumberMasked'] as String?,
+      accountNumberHash: json['accountNumberHash'] as String?,
+      ifscCode: json['ifscCode'] as String?,
+      accountType: json['accountType'] as String?,
+      currentBalancePaise: json['currentBalancePaise'] as int?,
+      availableBalancePaise: json['availableBalancePaise'] as int?,
+      lastStatementBalancePaise: json['lastStatementBalancePaise'] as int?,
+      lastUpdatedAt: json['lastUpdatedAt'] is String
+          ? DateTime.tryParse(json['lastUpdatedAt'] as String)
+          : null,
+      verificationStatus:
+          json['verificationStatus'] as String? ?? 'unidentified',
     );
   }
 }
@@ -1429,6 +1767,22 @@ class AccountTransfer {
   final int amountPaise;
   final DateTime at;
   final String note;
+
+  AccountTransfer copyWith({
+    String? fromAccountId,
+    String? toAccountId,
+    int? amountPaise,
+    DateTime? at,
+    String? note,
+  }) =>
+      AccountTransfer(
+        id: id,
+        fromAccountId: fromAccountId ?? this.fromAccountId,
+        toAccountId: toAccountId ?? this.toAccountId,
+        amountPaise: amountPaise ?? this.amountPaise,
+        at: at ?? this.at,
+        note: note ?? this.note,
+      );
 
   Map<String, Object?> toJson() => {
         'id': id,
@@ -1557,6 +1911,8 @@ class PendingEntry {
     this.warning = '',
     this.balancePaise,
     this.autoPay = false,
+    this.dedupKey,
+    this.billId,
   });
 
   final String id;
@@ -1578,6 +1934,14 @@ class PendingEntry {
   /// used to avoid preparing the same draft twice.
   final String? sourceKey;
 
+  /// Canonical dedup key computed from amount + date + normalized merchant,
+  /// shared across SMS and statement imports so the same real transaction
+  /// from either source produces the same key.
+  final String? dedupKey;
+
+  /// When the draft represents a payment of an existing bill, the bill's id.
+  final String? billId;
+
   /// Original SMS text, shown so the user can check the parse.
   final String sourceText;
   final String? recurringId;
@@ -1597,6 +1961,8 @@ class PendingEntry {
     String? warning,
     int? balancePaise,
     bool? autoPay,
+    String? dedupKey,
+    String? billId,
   }) =>
       PendingEntry(
         id: id,
@@ -1610,6 +1976,8 @@ class PendingEntry {
         warning: warning ?? this.warning,
         balancePaise: balancePaise ?? this.balancePaise,
         autoPay: autoPay ?? this.autoPay,
+        dedupKey: dedupKey ?? this.dedupKey,
+        billId: billId ?? this.billId,
       );
 
   Map<String, Object?> toJson() => {
@@ -1624,6 +1992,8 @@ class PendingEntry {
         if (warning.isNotEmpty) 'warning': warning,
         if (balancePaise != null) 'balancePaise': balancePaise,
         if (autoPay) 'autoPay': true,
+        if (dedupKey != null) 'dedupKey': dedupKey,
+        if (billId != null) 'billId': billId,
       };
 
   factory PendingEntry.fromJson(Map<String, dynamic> json) => PendingEntry(
@@ -1639,6 +2009,8 @@ class PendingEntry {
         warning: json['warning'] as String? ?? '',
         balancePaise: json['balancePaise'] as int?,
         autoPay: json['autoPay'] as bool? ?? false,
+        dedupKey: json['dedupKey'] as String?,
+        billId: json['billId'] as String?,
       );
 }
 
@@ -1719,6 +2091,116 @@ class SuspiciousSms {
         reason: json['reason'] as String? ?? '',
         snippet: json['snippet'] as String? ?? '',
         receivedAt: DateTime.parse(json['receivedAt'] as String),
+      );
+}
+
+/// A message that looks like a bank transaction but could not be read with
+/// confidence. It is kept so the user can check it (or paste it again) on the
+/// "Needs review" list. Only a redacted snippet is stored.
+class UnrecognizedSms {
+  const UnrecognizedSms({
+    required this.key,
+    required this.sender,
+    required this.snippet,
+    required this.receivedAt,
+    this.reason = '',
+  });
+
+  final String key;
+  final String sender;
+  final String snippet;
+  final DateTime receivedAt;
+  final String reason;
+
+  Map<String, Object?> toJson() => {
+        'key': key,
+        'sender': sender,
+        'snippet': snippet,
+        'receivedAt': receivedAt.toIso8601String(),
+        if (reason.isNotEmpty) 'reason': reason,
+      };
+
+  factory UnrecognizedSms.fromJson(Map<String, dynamic> json) =>
+      UnrecognizedSms(
+        key: json['key'] as String,
+        sender: json['sender'] as String? ?? '',
+        snippet: json['snippet'] as String? ?? '',
+        receivedAt: DateTime.parse(json['receivedAt'] as String),
+        reason: json['reason'] as String? ?? '',
+      );
+}
+
+/// Column positions saved for one bank's statement layout, so a later import
+/// does not have to guess again. [header] is the normalised heading row.
+class StatementMapping {
+  const StatementMapping({
+    required this.bank,
+    required this.header,
+    required this.dateIndex,
+    required this.narrationIndex,
+    this.debitIndex,
+    this.creditIndex,
+    this.amountIndex,
+    this.typeIndex,
+    this.balanceIndex,
+    this.creditCard = false,
+  });
+
+  final String bank;
+  final List<String> header;
+  final int dateIndex;
+  final int narrationIndex;
+  final int? debitIndex;
+  final int? creditIndex;
+  final int? amountIndex;
+  final int? typeIndex;
+  final int? balanceIndex;
+  final bool creditCard;
+
+  bool get hasAmountColumns =>
+      (debitIndex != null && creditIndex != null) || amountIndex != null;
+
+  StatementMapping withBank(String name) => StatementMapping(
+        bank: name,
+        header: header,
+        dateIndex: dateIndex,
+        narrationIndex: narrationIndex,
+        debitIndex: debitIndex,
+        creditIndex: creditIndex,
+        amountIndex: amountIndex,
+        typeIndex: typeIndex,
+        balanceIndex: balanceIndex,
+        creditCard: creditCard,
+      );
+
+  Map<String, Object?> toJson() => {
+        'bank': bank,
+        'header': header,
+        'dateIndex': dateIndex,
+        'narrationIndex': narrationIndex,
+        if (debitIndex != null) 'debitIndex': debitIndex,
+        if (creditIndex != null) 'creditIndex': creditIndex,
+        if (amountIndex != null) 'amountIndex': amountIndex,
+        if (typeIndex != null) 'typeIndex': typeIndex,
+        if (balanceIndex != null) 'balanceIndex': balanceIndex,
+        if (creditCard) 'creditCard': true,
+      };
+
+  factory StatementMapping.fromJson(Map<String, dynamic> json) =>
+      StatementMapping(
+        bank: json['bank'] as String? ?? 'Bank',
+        header: [
+          for (final item in (json['header'] as List? ?? const []))
+            if (item is String) item,
+        ],
+        dateIndex: json['dateIndex'] as int,
+        narrationIndex: json['narrationIndex'] as int,
+        debitIndex: json['debitIndex'] as int?,
+        creditIndex: json['creditIndex'] as int?,
+        amountIndex: json['amountIndex'] as int?,
+        typeIndex: json['typeIndex'] as int?,
+        balanceIndex: json['balanceIndex'] as int?,
+        creditCard: json['creditCard'] as bool? ?? false,
       );
 }
 

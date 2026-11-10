@@ -1,8 +1,10 @@
+import 'dart:math' show max;
+
 import 'bank_sms.dart';
 import 'formatters.dart';
 import 'local_store.dart';
 import 'models.dart';
-import 'personal.dart' show suggestCategory;
+import 'personal.dart' show suggestCategory, dedupKeyForEntry;
 import 'recurring_detect.dart';
 
 typedef SmsMessage = ({String address, String body, DateTime date});
@@ -36,8 +38,18 @@ class SmsImport {
   final duplicates = <String>[];
   final suspicious = <SuspiciousSms>[];
 
+  /// Bank-like messages that could not be read. Kept for the user to check
+  /// or record by hand instead of being silently dropped.
+  final unrecognized = <UnrecognizedSms>[];
+
   /// Latest balance per account seen in this batch.
   final balances = <String, BankBalance>{};
+
+  /// Bank that sent each draft, keyed by its SMS fingerprint. Used when the
+  /// import is applied to link the transaction to the account the balance
+  /// created or matched, even though that account did not exist when the
+  /// draft was built.
+  final draftBanks = <String, String>{};
 
   /// Keys of every message this import used, to mark them as seen.
   Iterable<String> get handled => [
@@ -46,6 +58,7 @@ class SmsImport {
         ...recurringMatches.map((item) => item.key),
         ...duplicates,
         ...suspicious.map((item) => item.key),
+        ...unrecognized.map((item) => item.key),
       ];
 
   bool get isEmpty =>
@@ -53,6 +66,7 @@ class SmsImport {
       confirmations.isEmpty &&
       recurringMatches.isEmpty &&
       suspicious.isEmpty &&
+      unrecognized.isEmpty &&
       balances.isEmpty;
 
   void _noteBalance(BankBalance balance) {
@@ -84,6 +98,8 @@ class SmsImport {
       if (balances.isNotEmpty)
         '${balances.length} balance${balances.length == 1 ? '' : 's'} updated',
       if (duplicates.isNotEmpty) '${duplicates.length} already recorded',
+      if (unrecognized.isNotEmpty)
+        '${unrecognized.length} message${unrecognized.length == 1 ? '' : 's'} need review',
       if (suspicious.isNotEmpty)
         '${suspicious.length} possible scam message${suspicious.length == 1 ? '' : 's'} held back',
     ];
@@ -139,7 +155,8 @@ SmsImport buildSmsImport(LifePilotStore store, Iterable<SmsMessage> messages) {
     }
     // Personal messages from phone numbers are never transactions.
     if (sender.kind == SenderKind.phoneNumber) continue;
-    final parsed = parseBankSms(message.body, received: message.date);
+    final parsed = parseBankSms(message.body,
+        received: message.date, senderHeader: sender.header);
     final bankName =
         sender.bank ?? (sender.header.isEmpty ? 'your bank' : sender.header);
 
@@ -156,7 +173,21 @@ SmsImport buildSmsImport(LifePilotStore store, Iterable<SmsMessage> messages) {
         at: message.date,
       ));
     }
-    if (parsed == null) continue;
+    if (parsed == null) {
+      if (looksLikeTransactionSms(message.body, sender)) {
+        final snippet = redactSms(message.body);
+        result.unrecognized.add(UnrecognizedSms(
+          key: key,
+          sender: message.address,
+          snippet:
+              snippet.length > 280 ? '${snippet.substring(0, 280)}…' : snippet,
+          receivedAt: message.date,
+          reason: 'LifePilot could not read the amount or direction with '
+              'confidence. Check it, then record it by hand if it is real.',
+        ));
+      }
+      continue;
+    }
     final date = parsed.date;
     final occurredAt = date == null ||
             (date.year == message.date.year &&
@@ -315,15 +346,60 @@ SmsImport buildSmsImport(LifePilotStore store, Iterable<SmsMessage> messages) {
           parsed.amountPaise >= settings.largePaymentPaise)
         'Large debit not started from LifePilot. If you did not make it, call your bank and the 1930 cyber-fraud helpline straight away.',
     ];
+    final dedupKey = dedupKeyForEntry(
+      kind: parsed.kind,
+      amountPaise: parsed.amountPaise,
+      occurredAt: occurredAt,
+      merchant: counterparty,
+    );
+    // Skip if this transaction is already waiting as a draft from a
+    // different source (e.g. statement import) — same amount, date and
+    // merchant. Within the same SMS batch, exact duplicates are already
+    // handled by the duplicate detection above.
+    if (store.pending.any((d) => d.dedupKey == dedupKey)) {
+      result.duplicates.add(key);
+      continue;
+    }
+
+    // 4b. Match an expense SMS against an existing unpaid bill, so paying a
+    // bill via bank SMS can mark the bill as paid without duplicating the
+    // expense. Match on merchant name and amount, within a date window.
+    String? matchedBillId;
+    if (parsed.kind == EntryKind.expense && !parsed.isRefund) {
+      final smsLower = counterparty.toLowerCase();
+      final smsDate = occurredAt;
+      final activeBills = store.bills.where((b) => b.active).toList();
+      for (final bill in activeBills) {
+        final due = bill.nextDueAt;
+        // Bill can be paid up to 30 days early or 7 days late.
+        if (smsDate.isBefore(due.subtract(const Duration(days: 30))) ||
+            smsDate.isAfter(due.add(const Duration(days: 7)))) {
+          continue;
+        }
+        final billLower = bill.name.toLowerCase();
+        final nameMatch =
+            smsLower.contains(billLower) || billLower.contains(smsLower);
+        if (!nameMatch) continue;
+        final amountClose =
+            (parsed.amountPaise - bill.amountPaise).abs() <=
+                max(bill.amountPaise ~/ 20, 100);
+        if (!amountClose) continue;
+        matchedBillId = bill.id;
+        break;
+      }
+    }
+    result.draftBanks[key] = bankName;
     result.drafts.add(PendingEntry(
       id: '',
       source: 'sms',
       sourceKey: key,
+      dedupKey: dedupKey,
       createdAt: store.now(),
       sourceText: sourceText,
       warning: warnings.join(' '),
       balancePaise: balance?.isLimit == false ? balance!.paise : null,
       autoPay: parsed.isAutoPay,
+      billId: matchedBillId,
       entry: LedgerEntry(
         id: '',
         kind: parsed.kind,
@@ -336,6 +412,7 @@ SmsImport buildSmsImport(LifePilotStore store, Iterable<SmsMessage> messages) {
         accountId: accountId,
         note: note,
         source: 'sms',
+        billId: matchedBillId,
       ),
     ));
   }

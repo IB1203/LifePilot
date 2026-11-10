@@ -812,6 +812,8 @@ class EntryTile extends StatelessWidget {
       if (entry.merchant.isNotEmpty) entry.merchant,
       entry.paymentMethod,
       friendlyDay(entry.occurredAt, now),
+      if (entry.sourceType != null && entry.sourceType!.isNotEmpty)
+        entry.sourceType!,
     ].join(' · ');
     return ListTile(
       onTap: onTap,

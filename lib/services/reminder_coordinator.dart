@@ -164,6 +164,8 @@ class ReminderCoordinator with WidgetsBindingObserver {
           messages.value = 'Reminder snoozed for 10 minutes.';
         }
         navigation.value = 'tasks';
+      case 'debt':
+        navigation.value = 'finance';
       case 'habit':
         navigation.value = 'tasks';
       case 'bill':
