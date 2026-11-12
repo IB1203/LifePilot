@@ -25,6 +25,9 @@ import 'plan_tab.dart';
 import 'spending_habits_section.dart';
 import 'upi_page.dart';
 
+/// Position of the Recurring tab in [FinancePage]'s tab bar.
+const _recurringTab = 5;
+
 class FinancePage extends StatelessWidget {
   const FinancePage({required this.store, super.key});
 
@@ -32,7 +35,7 @@ class FinancePage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => DefaultTabController(
-        length: 12,
+        length: 13,
         child: Column(
           children: [
             Material(
@@ -42,6 +45,7 @@ class FinancePage extends StatelessWidget {
                 tabAlignment: TabAlignment.start,
                 tabs: [
                   Tab(text: 'Overview'),
+                  Tab(text: 'Activity'),
                   Tab(text: 'Bills'),
                   Tab(text: 'Plan'),
                   Tab(text: 'Budgets'),
@@ -60,6 +64,7 @@ class FinancePage extends StatelessWidget {
               child: TabBarView(
                 children: [
                   _OverviewTab(store: store),
+                  _ActivityTab(store: store),
                   _BillsTab(store: store),
                   PlanTab(store: store),
                   _BudgetsTab(store: store),
@@ -95,7 +100,7 @@ class _OverviewTab extends StatelessWidget {
     final month = summarize(store.entries, monthRange(now));
     final budgets = monthlyBudgetTotals(store.budgets, store.entries, now);
     final categories = categoryTotals(store.entries, monthRange(now));
-    final current = DateRange(monthRange(now).start, now);
+    final current = DateRange(monthRange(now).start, dayRange(now).end);
     final previousMonth = DateTime(now.year, now.month - 1);
     final previousDays = DateTime(now.year, now.month, 0).day;
     final sameDay = now.day > previousDays ? previousDays : now.day;
@@ -139,7 +144,9 @@ class _OverviewTab extends StatelessWidget {
                     '${store.pending.length} ${store.pending.length == 1 ? 'draft is' : 'drafts are'} waiting for review'),
                 subtitle: const Text('Recurring entries and SMS transactions'),
                 trailing: const Icon(Icons.chevron_right),
-                onTap: () => DefaultTabController.of(context).animateTo(4),
+                // The Recurring tab lists the drafts with Approve buttons.
+                onTap: () =>
+                    DefaultTabController.of(context).animateTo(_recurringTab),
               ),
             ),
           ),
@@ -503,7 +510,9 @@ class _ActivityTab extends StatefulWidget {
 class _ActivityTabState extends State<_ActivityTab> {
   final _search = TextEditingController();
   EntryKind? _kind;
-  _Period _period = _Period.month;
+  // All time by default, so every approved transaction is listed, including
+  // last month's statement and SMS imports.
+  _Period _period = _Period.all;
   _Sort _sort = _Sort.newest;
   String? _category;
 
@@ -1782,7 +1791,9 @@ class _DuplicateReviewDialog extends StatefulWidget {
 
 class _DuplicateReviewDialogState extends State<_DuplicateReviewDialog> {
   late final List<DuplicateGroup> groups;
-  final keepByGroup = <int, String>{};
+  /// Chosen entry to keep, by the group's first entry id, so the choice
+  /// stays with its group when other groups are merged and removed.
+  final keepByGroup = <String, String>{};
 
   @override
   void initState() {
@@ -1790,8 +1801,8 @@ class _DuplicateReviewDialogState extends State<_DuplicateReviewDialog> {
     groups = [...widget.groups];
   }
 
-  String _keepFor(int index) =>
-      keepByGroup[index] ?? groups[index].entries.first.id;
+  String _keepFor(DuplicateGroup group) =>
+      keepByGroup[group.entries.first.id] ?? group.entries.first.id;
 
   @override
   Widget build(BuildContext context) {
@@ -1806,7 +1817,7 @@ class _DuplicateReviewDialogState extends State<_DuplicateReviewDialog> {
                 itemCount: groups.length,
                 itemBuilder: (context, index) {
                   final group = groups[index];
-                  final keep = _keepFor(index);
+                  final keep = _keepFor(group);
                   return Card(
                     margin: const EdgeInsets.only(bottom: 12),
                     child: Column(
@@ -1825,8 +1836,8 @@ class _DuplicateReviewDialogState extends State<_DuplicateReviewDialog> {
                             leading: Icon(entry.id == keep
                                 ? Icons.radio_button_checked
                                 : Icons.radio_button_unchecked),
-                            onTap: () => setState(
-                                () => keepByGroup[index] = entry.id),
+                            onTap: () => setState(() => keepByGroup[
+                                group.entries.first.id] = entry.id),
                             title: Text(entry.title),
                             subtitle: Text([
                               formatDate(entry.occurredAt),
@@ -1853,7 +1864,10 @@ class _DuplicateReviewDialogState extends State<_DuplicateReviewDialog> {
                                       error: true);
                                   return;
                                 }
-                                setState(() => groups.removeAt(index));
+                                setState(() {
+                                  groups.remove(group);
+                                  keepByGroup.remove(group.entries.first.id);
+                                });
                                 showMessage(context,
                                     'Merged ${group.entries.length} entries into “${merged.title}”.');
                               },

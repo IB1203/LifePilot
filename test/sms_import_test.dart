@@ -76,7 +76,7 @@ void main() {
     expect(import.suspicious.single.snippet, isNot(contains('http')));
     await store.applySmsImport(import);
     expect(store.suspiciousSms, hasLength(1));
-    expect(store.seenSms, hasLength(1),
+    expect(store.seenSms.where((key) => key.startsWith('sms:')), hasLength(1),
         reason: 'personal messages are not remembered');
     await store.dismissSuspicious(store.suspiciousSms.single.key);
     expect(store.suspiciousSms, isEmpty);
@@ -335,7 +335,7 @@ void main() {
     await store.forgetSmsText();
     expect(store.pending.single.sourceText, isEmpty);
     expect(store.suspiciousSms, isEmpty);
-    expect(store.seenSms, hasLength(2));
+    expect(store.seenSms.where((key) => key.startsWith('sms:')), hasLength(2));
   });
 
   test('new lists survive backup and restore', () async {

@@ -92,7 +92,8 @@ void main() {
           isNull);
     });
 
-    test('net worth includes card dues and goal savings', () {
+    test('net worth includes card dues; goal savings are already in accounts',
+        () {
       final worth = netWorth(
         accounts: const [savings, card],
         entries: const [],
@@ -109,7 +110,27 @@ void main() {
           ),
         ],
       )!;
-      expect(worth.paise, 1000000 - 300000 + 200000);
+      // The goal's ₹2,000 sits inside the savings account, so adding it
+      // again would count it twice.
+      expect(worth.paise, 1000000 - 300000);
+      final noAccounts = netWorth(
+        accounts: const [],
+        entries: const [],
+        transfers: const [],
+        goals: [
+          SavingsGoal(
+            id: 'g',
+            name: 'Trip',
+            targetPaise: 5000000,
+            createdAt: _now,
+            contributions: [
+              GoalContribution(id: 'c', amountPaise: 200000, at: _now)
+            ],
+          ),
+        ],
+      )!;
+      expect(noAccounts.paise, 200000,
+          reason: 'with no accounts tracked, goal savings are the record');
     });
   });
 

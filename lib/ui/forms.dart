@@ -488,7 +488,6 @@ class _EntryFormState extends State<_EntryForm> {
       return [
         TransactionClassification.expense,
         TransactionClassification.investment,
-        TransactionClassification.refund,
         TransactionClassification.transfer,
         TransactionClassification.bills,
         TransactionClassification.shopping,
@@ -500,9 +499,11 @@ class _EntryFormState extends State<_EntryForm> {
     }
     return [
       TransactionClassification.income,
+      TransactionClassification.refund,
       TransactionClassification.receivedMoney,
       TransactionClassification.loanReceived,
       TransactionClassification.investment,
+      TransactionClassification.transfer,
       TransactionClassification.other,
     ];
   }
@@ -532,6 +533,13 @@ class _EntryFormState extends State<_EntryForm> {
             onSelectionChanged: (selection) => setState(() {
               _kind = selection.first;
               _category = _defaultCategory(_kind);
+              // A type from the other direction would count this entry on
+              // the wrong side of the totals.
+              if (!_classificationChoices.contains(_classification)) {
+                _classification = _kind == EntryKind.income
+                    ? TransactionClassification.income
+                    : TransactionClassification.expense;
+              }
             }),
           ),
           _gap,
@@ -758,6 +766,7 @@ class _EntryFormState extends State<_EntryForm> {
       note: _note.text.trim(),
       accountId: _accountId,
       receiptPath: _receiptPath,
+      classification: _classification,
     );
     if (!_editing) {
       final duplicates = findPossibleDuplicates(widget.store.entries, draft);
@@ -822,6 +831,7 @@ class _EntryFormState extends State<_EntryForm> {
           note: draft.note,
           accountId: draft.accountId,
           receiptPath: draft.receiptPath,
+          classification: draft.classification,
         );
         messenger?.showSnackBar(SnackBar(
           content: Text(
@@ -2039,6 +2049,7 @@ class _MarkPaidFormState extends State<_MarkPaidForm> {
   late DateTime _paidAt;
   String _method = 'UPI';
   bool _recordExpense = true;
+  String? _accountId;
   bool _saving = false;
 
   @override
@@ -2091,6 +2102,22 @@ class _MarkPaidFormState extends State<_MarkPaidForm> {
           value: _recordExpense,
           onChanged: (value) => setState(() => _recordExpense = value),
         ),
+        if (_recordExpense &&
+            widget.store.accounts.any((account) => !account.archived))
+          DropdownButtonFormField<String?>(
+            initialValue: _accountId,
+            isExpanded: true,
+            decoration: const InputDecoration(
+                labelText: 'Paid from (optional)',
+                helperText: 'Keeps this account\'s balance in step.'),
+            items: [
+              const DropdownMenuItem(value: null, child: Text('No account set')),
+              for (final account
+                  in widget.store.accounts.where((account) => !account.archived))
+                DropdownMenuItem(value: account.id, child: Text(account.name)),
+            ],
+            onChanged: (value) => setState(() => _accountId = value),
+          ),
         Text(
           next == null
               ? 'This one-time bill will be marked settled.'
@@ -2115,6 +2142,7 @@ class _MarkPaidFormState extends State<_MarkPaidForm> {
       paidAt: _paidAt,
       recordExpense: _recordExpense,
       paymentMethod: _method,
+      accountId: _recordExpense ? _accountId : null,
     );
     if (!mounted) return;
     showMessage(context, '${widget.bill.name} marked as paid');

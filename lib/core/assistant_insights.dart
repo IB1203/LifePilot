@@ -91,6 +91,7 @@ String _afford(LifePilotStore store, int amount, DateTime now) {
     accounts: store.accounts,
     entries: store.entries,
     transfers: store.transfers,
+    balanceOf: (account) => store.accountRunningBalance(account.id),
   );
   final upcoming =
       upcomingCommitments(bills: store.bills, rules: store.recurring, now: now)
@@ -220,6 +221,7 @@ String _forecast(LifePilotStore store, DateTime now) {
     accounts: store.accounts,
     entries: store.entries,
     transfers: store.transfers,
+    balanceOf: (account) => store.accountRunningBalance(account.id),
   );
   final cash = forecastCash(
     startPaise: start?.paise,
@@ -290,6 +292,7 @@ String _netWorth(LifePilotStore store, DateTime now) {
     accounts: store.accounts,
     entries: store.entries,
     transfers: store.transfers,
+    balanceOf: (account) => store.accountRunningBalance(account.id),
     goals: store.goals,
     debtsPaise: debts.owedPaise,
     lentPaise: debts.lentPaise,

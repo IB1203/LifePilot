@@ -7,7 +7,6 @@ import '../core/investments.dart' show portfolio;
 import '../core/local_store.dart';
 import '../core/money_glance.dart';
 import '../core/models.dart';
-import '../core/personal.dart' show accountBalance;
 import '../ui/theme.dart';
 import '../ui/widgets.dart';
 import '../ui/forms.dart' show showMarkPaidForm;
@@ -36,6 +35,7 @@ class MoneyGlanceSection extends StatelessWidget {
       accounts: store.accounts,
       entries: store.entries,
       transfers: store.transfers,
+      balanceOf: (account) => store.accountRunningBalance(account.id),
     );
     final saved = store.goals.fold(0, (sum, goal) => sum + goal.savedPaise);
     final upcoming = upcomingCommitments(
@@ -60,7 +60,7 @@ class MoneyGlanceSection extends StatelessWidget {
       rules: store.recurring,
       now: now,
       availablePaise: available?.paise,
-      monthlyEmiPaise: debt.monthlyPaise,
+      monthlyEmiPaise: debtPaymentsStillDue(store.debts, now),
     );
     final forecast = monthForecast(
         entries: store.entries,
@@ -74,6 +74,7 @@ class MoneyGlanceSection extends StatelessWidget {
       accounts: store.accounts,
       entries: store.entries,
       transfers: store.transfers,
+      balanceOf: (account) => store.accountRunningBalance(account.id),
       goals: store.goals,
       debtsPaise: debt.owedPaise,
       lentPaise: debt.lentPaise,
@@ -150,9 +151,9 @@ class MoneyGlanceSection extends StatelessWidget {
             for (final account in store.accounts.where((item) => !item.archived).take(4))
               StatTile(
                 label: account.name,
-                value: formatMoney(accountBalance(account, store.entries, store.transfers)),
+                value: formatMoney(store.accountRunningBalance(account.id)),
                 icon: _accountIcon(account.kind),
-                color: accountBalance(account, store.entries, store.transfers) < 0
+                color: store.accountRunningBalance(account.id) < 0
                     ? colors.expense
                     : null,
                 caption: '${account.kind.label} · tap to open Finance',

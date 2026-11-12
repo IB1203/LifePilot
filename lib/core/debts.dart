@@ -269,6 +269,14 @@ class Payoff {
   final DateTime closesOn;
 }
 
+/// [date] moved by [months] calendar months, keeping the day but clamping
+/// it to the last day of a shorter month (31 Jan + 1 month = 28/29 Feb).
+DateTime addMonthsClamped(DateTime date, int months) {
+  final lastDay = DateTime(date.year, date.month + months + 1, 0).day;
+  return DateTime(date.year, date.month + months,
+      date.day > lastDay ? lastDay : date.day);
+}
+
 /// Months and total interest to clear [balancePaise] paying
 /// [monthlyPaise] a month from [from], interest charged monthly. Null when
 /// the payment does not cover the interest (the debt would never close)
@@ -291,7 +299,7 @@ Payoff? payoff(int balancePaise, double annualRatePercent, int monthlyPaise,
       return Payoff(
         months: month,
         interestPaise: interest.round(),
-        closesOn: DateTime(from.year, from.month + month, from.day),
+        closesOn: addMonthsClamped(from, month),
       );
     }
   }
@@ -306,6 +314,27 @@ int monthlyPaymentFor(Debt debt, int outstandingPaise) {
     return math.min(outstandingPaise, math.max(20000, outstandingPaise ~/ 20));
   }
   return 0;
+}
+
+/// Monthly debt payments still to be made in [now]'s month: each open
+/// debt's monthly payment less what was already paid on it this month. A
+/// payment already made has left the bank balance, so it must not be set
+/// aside a second time.
+int debtPaymentsStillDue(Iterable<Debt> debts, DateTime now) {
+  final monthStart = DateTime(now.year, now.month);
+  final monthEnd = DateTime(now.year, now.month + 1);
+  var total = 0;
+  for (final debt in debts.where((debt) => !debt.closed && !debt.owedToMe)) {
+    final outstanding = debtStatus(debt, asOf: now).outstandingPaise;
+    if (outstanding <= 0) continue;
+    final due = monthlyPaymentFor(debt, outstanding);
+    final paid = debt.payments
+        .where((item) =>
+            !item.at.isBefore(monthStart) && item.at.isBefore(monthEnd))
+        .fold(0, (sum, item) => sum + item.amountPaise);
+    if (due > paid) total += due - paid;
+  }
+  return total;
 }
 
 // ---------------------------------------------------------------------------

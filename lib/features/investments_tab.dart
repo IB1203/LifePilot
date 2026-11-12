@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../core/formatters.dart';
 import '../core/investments.dart';
 import '../core/local_store.dart';
+import '../core/models.dart' show Account;
 import '../ui/charts.dart';
 import '../ui/theme.dart';
 import '../ui/widgets.dart';
@@ -177,18 +178,24 @@ class _InvestmentCard extends StatelessWidget {
                           await _askAmount(context,
                               title: 'Current value of ${item.name}',
                               initial: line.value?.paise,
-                              onSave: (paise) =>
+                              onSave: (paise, _) =>
                                   store.setInvestmentValue(item.id, paise));
                         case 'add':
                           await _askAmount(context,
                               title: 'Money put into ${item.name}',
-                              onSave: (paise) =>
-                                  store.addInvestmentFlow(item.id, paise));
+                              accounts: _activeAccounts(store),
+                              accountLabel: 'Paid from (optional)',
+                              onSave: (paise, accountId) =>
+                                  store.addInvestmentFlow(item.id, paise,
+                                      accountId: accountId));
                         case 'withdraw':
                           await _askAmount(context,
                               title: 'Money taken out of ${item.name}',
-                              onSave: (paise) =>
-                                  store.addInvestmentFlow(item.id, -paise));
+                              accounts: _activeAccounts(store),
+                              accountLabel: 'Paid into (optional)',
+                              onSave: (paise, accountId) =>
+                                  store.addInvestmentFlow(item.id, -paise,
+                                      accountId: accountId));
                         case 'close':
                           await store
                               .updateInvestment(item.copyWith(closed: true));
@@ -263,22 +270,38 @@ class _InvestmentCard extends StatelessWidget {
   }
 }
 
+List<Account> _activeAccounts(LifePilotStore store) =>
+    store.accounts.where((account) => !account.archived).toList();
+
 Future<void> _askAmount(BuildContext context,
     {required String title,
     int? initial,
-    required Future<void> Function(int paise) onSave}) async {
-  final paise = await showDialog<int>(
+    List<Account> accounts = const [],
+    String accountLabel = 'Account (optional)',
+    required Future<void> Function(int paise, String? accountId)
+        onSave}) async {
+  final result = await showDialog<({int paise, String? accountId})>(
     context: context,
-    builder: (_) => _AmountDialog(title: title, initial: initial),
+    builder: (_) => _AmountDialog(
+        title: title,
+        initial: initial,
+        accounts: accounts,
+        accountLabel: accountLabel),
   );
-  if (paise != null) await onSave(paise);
+  if (result != null) await onSave(result.paise, result.accountId);
 }
 
 class _AmountDialog extends StatefulWidget {
-  const _AmountDialog({required this.title, this.initial});
+  const _AmountDialog(
+      {required this.title,
+      this.initial,
+      this.accounts = const [],
+      this.accountLabel = 'Account (optional)'});
 
   final String title;
   final int? initial;
+  final List<Account> accounts;
+  final String accountLabel;
 
   @override
   State<_AmountDialog> createState() => _AmountDialogState();
@@ -288,6 +311,7 @@ class _AmountDialogState extends State<_AmountDialog> {
   late final _controller = TextEditingController(
       text: widget.initial == null ? '' : paiseToInput(widget.initial!));
   String? _error;
+  String? _accountId;
 
   @override
   void dispose() {
@@ -298,12 +322,34 @@ class _AmountDialogState extends State<_AmountDialog> {
   @override
   Widget build(BuildContext context) => AlertDialog(
         title: Text(widget.title),
-        content: TextField(
-          controller: _controller,
-          autofocus: true,
-          keyboardType: const TextInputType.numberWithOptions(decimal: true),
-          decoration: InputDecoration(
-              prefixText: '${MoneyFormat.symbol} ', errorText: _error),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: _controller,
+              autofocus: true,
+              keyboardType:
+                  const TextInputType.numberWithOptions(decimal: true),
+              decoration: InputDecoration(
+                  prefixText: '${MoneyFormat.symbol} ', errorText: _error),
+            ),
+            if (widget.accounts.isNotEmpty)
+              DropdownButtonFormField<String?>(
+                initialValue: _accountId,
+                isExpanded: true,
+                decoration: InputDecoration(
+                    labelText: widget.accountLabel,
+                    helperText: 'Keeps this account\'s balance in step.'),
+                items: [
+                  const DropdownMenuItem(
+                      value: null, child: Text('No account set')),
+                  for (final account in widget.accounts)
+                    DropdownMenuItem(
+                        value: account.id, child: Text(account.name)),
+                ],
+                onChanged: (value) => setState(() => _accountId = value),
+              ),
+          ],
         ),
         actions: [
           TextButton(
@@ -316,7 +362,7 @@ class _AmountDialogState extends State<_AmountDialog> {
                 setState(() => _error = 'Enter an amount greater than zero.');
                 return;
               }
-              Navigator.pop(context, paise);
+              Navigator.pop(context, (paise: paise, accountId: _accountId));
             },
             child: const Text('Save'),
           ),
@@ -351,6 +397,7 @@ class _InvestmentFormState extends State<_InvestmentForm> {
   var _kind = InvestmentKind.mutualFund;
   late var _start = dateOnly(widget.store.now());
   DateTime? _maturity;
+  String? _accountId;
 
   @override
   void dispose() {
@@ -510,6 +557,25 @@ class _InvestmentFormState extends State<_InvestmentForm> {
                   ),
                 ],
               ),
+            if (_activeAccounts(widget.store).isNotEmpty) ...[
+              const SizedBox(height: 8),
+              DropdownButtonFormField<String?>(
+                initialValue: _accountId,
+                isExpanded: true,
+                decoration: const InputDecoration(
+                    labelText: 'Paid from (optional)',
+                    helperText:
+                        'Takes the amount invested out of this account.'),
+                items: [
+                  const DropdownMenuItem(
+                      value: null, child: Text('No account set')),
+                  for (final account in _activeAccounts(widget.store))
+                    DropdownMenuItem(
+                        value: account.id, child: Text(account.name)),
+                ],
+                onChanged: (value) => setState(() => _accountId = value),
+              ),
+            ],
             const SizedBox(height: 16),
             FilledButton(onPressed: _save, child: const Text('Save')),
           ],
@@ -537,6 +603,7 @@ class _InvestmentFormState extends State<_InvestmentForm> {
       maturityDate: _maturity,
       sipPaise: parseRupeesToPaise(_sip.text) ?? 0,
       sipDay: int.tryParse(_sipDay.text.trim()),
+      fromAccountId: _accountId,
     );
     if (mounted) Navigator.pop(context);
   }

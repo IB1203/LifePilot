@@ -43,6 +43,7 @@ class _CashFlowSection extends StatelessWidget {
       accounts: store.accounts,
       entries: store.entries,
       transfers: store.transfers,
+      balanceOf: (account) => store.accountRunningBalance(account.id),
     );
     final forecast = forecastCash(
       startPaise: start?.paise,

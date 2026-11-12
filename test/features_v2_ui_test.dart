@@ -241,6 +241,44 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('LifePilot is locked'), findsNothing);
     expect(find.text('Good morning'), findsOneWidget);
+    expect(store.settings.pinLength, 4,
+        reason: 'an older PIN remembers its length after unlocking');
+  });
+
+  testWidgets('a 6-digit PIN shows 6 dots and waits for all of them',
+      (tester) async {
+    final store = LifePilotStore.inMemory(clock: () => _now);
+    final pin = await hashPin('258014', iterations: 1000);
+    await store.updateSettings(store.settings.copyWith(
+      lockEnabled: true,
+      pinHash: pin.hash,
+      pinSalt: pin.salt,
+      pinLength: 6,
+      lockUseBiometrics: false,
+    ));
+    await _pumpApp(tester, store);
+    expect(
+        find.descendant(
+            of: find.bySemanticsLabel('0 digits entered'),
+            matching: find.byType(AnimatedContainer)),
+        findsNWidgets(6));
+    for (final digit in ['2', '5', '8', '0']) {
+      await tester.tap(find.text(digit));
+      await tester.pump();
+    }
+    await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 300)));
+    await tester.pumpAndSettle();
+    expect(find.text('LifePilot is locked'), findsOneWidget);
+    expect(find.text('That is my full PIN'), findsNothing);
+    for (final digit in ['1', '4']) {
+      await tester.tap(find.text(digit));
+      await tester.pump();
+    }
+    await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 300)));
+    await tester.pumpAndSettle();
+    expect(find.text('LifePilot is locked'), findsNothing);
   });
 
   testWidgets('habit check-in from the Habits tab', (tester) async {

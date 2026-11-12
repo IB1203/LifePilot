@@ -22,6 +22,7 @@ abstract class InvestmentRepository {
     int installmentPaise = 0,
     int sipPaise = 0,
     int? sipDay,
+    String? fromAccountId,
   });
 
   /// Replaces an existing investment.
@@ -35,6 +36,7 @@ abstract class InvestmentRepository {
     String id,
     int amountPaise, {
     DateTime? at,
+    String? accountId,
   });
 
   /// Sets the current value of an investment.

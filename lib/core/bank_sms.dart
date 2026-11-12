@@ -228,12 +228,41 @@ class ParsedSms {
 }
 
 final _ignoreSms = RegExp(
-  r'\b(otp|one[- ]time password|verification code|will be (?:debited|deducted|charged)|'
+  r'\b(will be (?:debited|deducted|charged|credited|refunded|reversed)|'
   r'to be debited|is due|due on|due date|requested|request of|collect request|'
-  r'your request|failed|declined|unsuccessful|reminder|offer|cashback upto|'
+  r'your request|reminder|offer|cashback upto|'
   r'pre-?approved|loan offer)\b',
   caseSensitive: false,
 );
+
+/// One-time passwords. Ignored unless the OTP is only mentioned in a safety
+/// line ("Never share your OTP") under a completed transaction.
+final _otp = RegExp(r'\b(otp|one[- ]time password|verification code)\b',
+    caseSensitive: false);
+final _otpWarning = RegExp(
+    r"\b(?:never|do not|don't|dont|not to)\s+(?:share|disclose|tell)\b",
+    caseSensitive: false);
+final _completed = RegExp(
+    r'\b(debited|credited|spent|withdrawn|deducted|paid|sent|received)\b',
+    caseSensitive: false);
+
+/// A transaction that did not go through. Ignored, except when the message
+/// reports the money coming back ("credited ... reversal of failed txn").
+final _failed =
+    RegExp(r'\b(failed|declined|unsuccessful)\b', caseSensitive: false);
+final _returned = RegExp(
+    r'\b(credited|has been (?:refunded|reversed)|refunded to|reversed to)\b',
+    caseSensitive: false);
+
+bool _ignorable(String text) {
+  if (_ignoreSms.hasMatch(text)) return true;
+  if (_otp.hasMatch(text) &&
+      !(_otpWarning.hasMatch(text) && _completed.hasMatch(text))) {
+    return true;
+  }
+  if (_failed.hasMatch(text) && !_returned.hasMatch(text)) return true;
+  return false;
+}
 
 /// Standing-instruction words. Set-up notices are ignored; executed debits
 /// are kept and marked as autopay.
@@ -274,10 +303,18 @@ class SenderTemplate {
   final RegExp? amountPattern;
 
   EntryKind? direction(String balanceStripped) {
-    Match? earliest(List<RegExp> patterns) {
+    // "credited to VPA x@y" / "credited to beneficiary" is the payee's side
+    // of a payment the user made, never money coming in.
+    final payeeSide = _payeeCredits(balanceStripped);
+    bool isPayeeSide(Match match) => payeeSide
+        .any((side) => match.start >= side.start && match.start < side.end);
+    Match? earliest(List<RegExp> patterns, {bool skipPayee = false}) {
       Match? best;
       for (final pattern in patterns) {
-        final match = pattern.firstMatch(balanceStripped);
+        final match = pattern
+            .allMatches(balanceStripped)
+            .where((match) => !skipPayee || !isPayeeSide(match))
+            .firstOrNull;
         if (match == null) continue;
         if (best == null || match.start < best.start) best = match;
       }
@@ -285,8 +322,10 @@ class SenderTemplate {
     }
 
     final debit = earliest(debitPatterns);
-    final credit = earliest(creditPatterns);
-    if (debit == null && credit == null) return null;
+    final credit = earliest(creditPatterns, skipPayee: true);
+    if (debit == null && credit == null) {
+      return payeeSide.isEmpty ? null : EntryKind.expense;
+    }
     if (debit == null) return EntryKind.income;
     if (credit == null) return EntryKind.expense;
     return debit.start < credit.start ? EntryKind.expense : EntryKind.income;
@@ -379,7 +418,7 @@ final _promo = RegExp(
 /// OTPs, requests, failures and promotional messages: never a completed
 /// transaction and not worth putting on the review list either.
 bool ignorableSms(String body) =>
-    _ignoreSms.hasMatch(body) || _promo.hasMatch(body);
+    _ignorable(body.replaceAll(RegExp(r'\s+'), ' ')) || _promo.hasMatch(body);
 
 /// Whether an unread message still looks like a real transaction that the
 /// parser could not handle. Used to build the "Needs review" list.
@@ -463,7 +502,7 @@ final _amountAfterVerb = RegExp(
     r'\b(?:debited|credited|withdrawn|deducted)\s+(?:by|with|for)\s+(?:rs[.:]?|inr|₹)?\s*([\d,]+(?:\.\d{1,2})?)',
     caseSensitive: false);
 final _balanceBefore = RegExp(
-    r'(?:bal|balance|limit|lmt|avl|avbl|available)[\s.:\-a-z]*$',
+    r'\b(?:bal|balance|limit|lmt|avl|avbl|available)\b[\s.:\-a-z]*$',
     caseSensitive: false);
 
 /// The transaction amount: the first rupee amount that is not a balance or
@@ -596,7 +635,7 @@ String? smsAccountHint(String text) => RegExp(
 ParsedSms? parseBankSms(String body,
     {DateTime? received, String? senderHeader}) {
   final text = body.replaceAll(RegExp(r'\s+'), ' ').trim();
-  if (_ignoreSms.hasMatch(text)) return null;
+  if (_ignorable(text)) return null;
   final autoPay = _autoPay.hasMatch(text);
   // Mandate set-up, change or cancellation notices move no money.
   if (autoPay &&
@@ -647,6 +686,15 @@ ParsedSms? parseBankSms(String body,
 }
 
 /// Stable identity for an SMS so it is never imported twice.
+/// A second identity for a message that ignores its exact time: sender,
+/// text and local day. The live SMS receiver records the service-centre
+/// time while the inbox records the arrival time, so the same message can
+/// reach LifePilot with two different [smsFingerprint]s.
+String smsContentKey(String address, String body, DateTime date) {
+  final day = '${date.year}-${date.month}-${date.day}';
+  return 'smsc:${smsFingerprint(address, body.trim(), DateTime.utc(2000)).substring(4)}:$day';
+}
+
 String smsFingerprint(String address, String body, DateTime date) {
   var hash = 0x811c9dc5;
   for (final unit

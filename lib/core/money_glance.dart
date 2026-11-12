@@ -22,7 +22,10 @@ Figure? availableMoney({
   required Iterable<Account> accounts,
   required Iterable<LedgerEntry> entries,
   required Iterable<AccountTransfer> transfers,
+  int Function(Account account)? balanceOf,
 }) {
+  final balance =
+      balanceOf ?? (Account item) => accountBalance(item, entries, transfers);
   final fromBank = bankBalances.where((item) => !item.isLimit).toList();
   if (fromBank.isNotEmpty) {
     return (
@@ -36,15 +39,18 @@ Figure? availableMoney({
       .toList();
   if (held.isEmpty) return null;
   return (
-    paise: held.fold(
-        0, (sum, item) => sum + accountBalance(item, entries, transfers)),
+    paise: held.fold(0, (sum, item) => sum + balance(item)),
     basis: 'Recorded balances of ${held.length} '
         'account${held.length == 1 ? '' : 's'}',
   );
 }
 
 /// Recorded balances of every active account, cards included (a card with
-/// dues is negative), plus money saved in goals, minus [debtsPaise].
+/// dues is negative), plus investments and money lent, minus [debtsPaise].
+///
+/// Goal savings are money set aside inside the user's accounts, so they are
+/// already part of the account balances. They are only added when no
+/// account is tracked, otherwise the same rupees would be counted twice.
 Figure? netWorth({
   required Iterable<Account> accounts,
   required Iterable<LedgerEntry> entries,
@@ -53,9 +59,14 @@ Figure? netWorth({
   int debtsPaise = 0,
   int lentPaise = 0,
   int investmentsPaise = 0,
+  int Function(Account account)? balanceOf,
 }) {
+  final balance =
+      balanceOf ?? (Account item) => accountBalance(item, entries, transfers);
   final active = accounts.where((item) => !item.archived).toList();
-  final saved = goals.fold(0, (sum, goal) => sum + goal.savedPaise);
+  final saved = active.isNotEmpty
+      ? 0
+      : goals.fold(0, (sum, goal) => sum + goal.savedPaise);
   if (active.isEmpty &&
       saved == 0 &&
       debtsPaise == 0 &&
@@ -63,8 +74,7 @@ Figure? netWorth({
       investmentsPaise == 0) {
     return null;
   }
-  final balances = active.fold(
-      0, (sum, item) => sum + accountBalance(item, entries, transfers));
+  final balances = active.fold(0, (sum, item) => sum + balance(item));
   return (
     paise: balances + saved + lentPaise + investmentsPaise - debtsPaise,
     basis: [
@@ -180,7 +190,7 @@ MonthForecast monthForecast({
           entry.kind == EntryKind.expense &&
           month.contains(entry.occurredAt) &&
           !_isFixed(entry) &&
-          !isInternalMovement(entry))
+          !isNonCashFlow(entry))
       .fold(0, (sum, entry) => sum + entry.amountPaise);
   final elapsed = now.day;
   final daysInMonth = DateTime(now.year, now.month + 1, 0).day;
@@ -287,12 +297,23 @@ SafeToSpend? safeToSpend({
   final totals = monthlyBudgetTotals(budgets, entries, now);
   if (totals.limitPaise > 0) {
     final left = totals.remainingPaise < 0 ? 0 : totals.remainingPaise;
-    final free = left - monthlyEmiPaise - bufferPaise;
+    var free = left - monthlyEmiPaise - bufferPaise;
+    var basis = 'Budgets left this month ÷ $daysIncludingToday days';
+    // Budgets are a plan; the bank balance is a hard limit. When the
+    // balance after bills, EMIs and the buffer is lower, use that instead.
+    if (availablePaise != null) {
+      final cash = availablePaise - committed - monthlyEmiPaise - bufferPaise;
+      if (cash < free) {
+        free = cash;
+        basis =
+            'Available balance − bills still due − EMIs − buffer (lower than budgets left), ÷ $daysIncludingToday days';
+      }
+    }
     final remaining = free < 0 ? 0 : free;
     return SafeToSpend(
       perDayPaise: remaining ~/ daysIncludingToday,
       remainingPaise: remaining,
-      basis: 'Budgets left this month ÷ $daysIncludingToday days',
+      basis: basis,
       days: daysIncludingToday,
       fundsPaise: totals.limitPaise,
       fundsLabel: 'Monthly budgets',

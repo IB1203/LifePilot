@@ -51,15 +51,26 @@ class SmsImport {
   /// draft was built.
   final draftBanks = <String, String>{};
 
-  /// Keys of every message this import used, to mark them as seen.
-  Iterable<String> get handled => [
-        ...drafts.map((draft) => draft.sourceKey!),
-        ...confirmations.map((item) => item.key),
-        ...recurringMatches.map((item) => item.key),
-        ...duplicates,
-        ...suspicious.map((item) => item.key),
-        ...unrecognized.map((item) => item.key),
-      ];
+  /// Time-free content key of each message, by fingerprint.
+  final contentKeys = <String, String>{};
+
+  /// Keys of every message this import used, to mark them as seen: each
+  /// fingerprint and its content key.
+  Iterable<String> get handled {
+    final keys = [
+      ...drafts.map((draft) => draft.sourceKey!),
+      ...confirmations.map((item) => item.key),
+      ...recurringMatches.map((item) => item.key),
+      ...duplicates,
+      ...suspicious.map((item) => item.key),
+      ...unrecognized.map((item) => item.key),
+    ];
+    return [
+      ...keys,
+      for (final key in keys)
+        if (contentKeys[key] != null) contentKeys[key]!,
+    ];
+  }
 
   bool get isEmpty =>
       drafts.isEmpty &&
@@ -123,6 +134,16 @@ bool _sameDayish(DateTime a, DateTime b, {int days = 1}) =>
 bool _mentions(String text, String? reference) =>
     reference != null && reference.length >= 6 && text.contains(reference);
 
+/// True when [text] carries a bank reference that is not [reference]: the
+/// two describe different payments.
+bool _otherReference(String text, String? reference) {
+  if (reference == null || reference.length < 6) return false;
+  final references = RegExp(r'\b[A-Za-z0-9]*\d{6,}[A-Za-z0-9]*\b')
+      .allMatches(text)
+      .map((match) => match.group(0)!);
+  return references.isNotEmpty && !references.contains(reference);
+}
+
 Set<String> _words(String value) => value
     .toLowerCase()
     .split(RegExp(r'[^a-z0-9]+'))
@@ -135,9 +156,20 @@ SmsImport buildSmsImport(LifePilotStore store, Iterable<SmsMessage> messages) {
   final result = SmsImport();
   final settings = store.settings;
   final inBatch = <String>{};
+  // Recorded recurring entries already matched to a message in this batch,
+  // so one entry cannot swallow two separate payments.
+  final usedRecurring = <String>{};
   for (final message in messages) {
     final key = smsFingerprint(message.address, message.body, message.date);
     if (store.seenSms.contains(key) || !inBatch.add(key)) continue;
+    // The same message seen through the other path (live receiver or inbox
+    // scan) under a slightly different time.
+    final contentKey =
+        smsContentKey(message.address, message.body, message.date);
+    if (store.seenSms.contains(contentKey) || !inBatch.add(contentKey)) {
+      continue;
+    }
+    result.contentKeys[key] = contentKey;
     final sender =
         classifySender(message.address, extraSenders: settings.extraSmsSenders);
     final reason = scamReason(sender, message.body);
@@ -209,9 +241,10 @@ SmsImport buildSmsImport(LifePilotStore store, Iterable<SmsMessage> messages) {
       final byReference = upiDrafts
           .where((draft) => _mentions(draft.entry.note, parsed.reference));
       final byTime = upiDrafts.where((draft) {
+        if (_otherReference(draft.entry.note, parsed.reference)) return false;
         final gap = message.date.difference(draft.entry.occurredAt);
         return gap >= const Duration(hours: -1) &&
-            gap <= const Duration(days: 3);
+            gap <= const Duration(days: 1);
       });
       final match = byReference.isNotEmpty
           ? byReference.first
@@ -265,12 +298,44 @@ SmsImport buildSmsImport(LifePilotStore store, Iterable<SmsMessage> messages) {
     }
 
     // 3. Already recorded, or already waiting as a draft.
+    // A recurring payment recorded (or confirmed by a statement) around its
+    // due date is the same payment, even a few days off or a little different.
+    bool sameRecurring(LedgerEntry entry) => matchesRecurring(
+          kind: entry.kind,
+          amountPaise: entry.amountPaise,
+          title: entry.title,
+          due: entry.occurredAt,
+          entry: probe,
+        );
+    final recordedRecurring = store.entries
+        .where((entry) =>
+            entry.source == 'recurring' &&
+            !usedRecurring.contains(entry.id) &&
+            sameRecurring(entry))
+        .firstOrNull;
+    if (recordedRecurring != null) {
+      usedRecurring.add(recordedRecurring.id);
+      result.duplicates.add(key);
+      continue;
+    }
+    final confirmedRecurring = store.pending.any((draft) =>
+        draft.source == 'recurring' &&
+        draft.bankConfirmed &&
+        !result.recurringMatches.any((item) => item.pendingId == draft.id) &&
+        draft.entry.amountPaise == parsed.amountPaise &&
+        _sameDayish(draft.entry.occurredAt, occurredAt) &&
+        sameRecurring(draft.entry));
+    if (confirmedRecurring) {
+      result.duplicates.add(key);
+      continue;
+    }
     final counterpartyWords = _words(parsed.counterparty);
     final duplicate = store.entries.any((entry) =>
             entry.kind == parsed.kind &&
             entry.amountPaise == parsed.amountPaise &&
             (_mentions(entry.note, parsed.reference) ||
                 (_sameDayish(entry.occurredAt, occurredAt) &&
+                    !_otherReference(entry.note, parsed.reference) &&
                     (entry.source == 'upi' ||
                         counterpartyWords
                             .intersection(
@@ -321,16 +386,6 @@ SmsImport buildSmsImport(LifePilotStore store, Iterable<SmsMessage> messages) {
         }
       }
     }
-    // A recurring entry already recorded around this date for about this
-    // amount may be the same payment. Ask rather than silently skip it.
-    final recordedRecurring = store.entries
-        .where((entry) =>
-            entry.source == 'recurring' &&
-            entry.kind == parsed.kind &&
-            closeAmount(entry.amountPaise, parsed.amountPaise) &&
-            entry.occurredAt.difference(occurredAt).inHours.abs() <=
-                5 * 24 + 12)
-        .firstOrNull;
     final warnings = [
       if (sender.kind == SenderKind.unknownHeader)
         'Sent by ${sender.header}, which is not a known bank sender. Check it is genuine before approving, or add it as your bank in Bank SMS settings.',
@@ -338,8 +393,6 @@ SmsImport buildSmsImport(LifePilotStore store, Iterable<SmsMessage> messages) {
         'Cash withdrawals move money into cash rather than spend it. If you track a cash wallet, record a transfer instead.',
       if (parsed.isCardBillPayment)
         'Looks like a credit card bill payment. It moves money between your own accounts, so it is not ${parsed.kind == EntryKind.income ? 'income' : 'spending'}. If you track the card as an account, record a transfer instead.',
-      if (recordedRecurring != null)
-        'You already recorded “${recordedRecurring.title}” for ${formatMoney(recordedRecurring.amountPaise)} on ${formatDate(recordedRecurring.occurredAt)} from a recurring entry. Discard this if it is the same payment.',
       if (parsed.kind == EntryKind.expense &&
           !atm &&
           !parsed.isAutoPay &&
@@ -376,7 +429,8 @@ SmsImport buildSmsImport(LifePilotStore store, Iterable<SmsMessage> messages) {
             smsDate.isAfter(due.add(const Duration(days: 7)))) {
           continue;
         }
-        final billLower = bill.name.toLowerCase();
+        final billLower = bill.name.toLowerCase().trim();
+        if (smsLower.trim().length < 3 || billLower.length < 3) continue;
         final nameMatch =
             smsLower.contains(billLower) || billLower.contains(smsLower);
         if (!nameMatch) continue;
@@ -413,6 +467,17 @@ SmsImport buildSmsImport(LifePilotStore store, Iterable<SmsMessage> messages) {
         note: note,
         source: 'sms',
         billId: matchedBillId,
+        sourceType: 'sms',
+        sourceReference: parsed.reference,
+        classification: parsed.isCardBillPayment
+            ? TransactionClassification.transfer
+            : atm
+                ? TransactionClassification.cashWithdrawal
+                : parsed.isRefund && parsed.kind == EntryKind.income
+                    ? TransactionClassification.refund
+                    : matchedBillId != null
+                        ? TransactionClassification.bills
+                        : TransactionClassification.other,
       ),
     ));
   }

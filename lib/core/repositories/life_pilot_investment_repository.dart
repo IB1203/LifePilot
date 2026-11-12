@@ -32,8 +32,10 @@ class LifePilotInvestmentRepository implements InvestmentRepository {
     int installmentPaise = 0,
     int sipPaise = 0,
     int? sipDay,
+    String? fromAccountId,
   }) async {
     return store.addInvestment(
+      fromAccountId: fromAccountId,
       name: name,
       kind: kind,
       startDate: startDate,
@@ -62,8 +64,9 @@ class LifePilotInvestmentRepository implements InvestmentRepository {
     String id,
     int amountPaise, {
     DateTime? at,
+    String? accountId,
   }) async {
-    await store.addInvestmentFlow(id, amountPaise, at: at);
+    await store.addInvestmentFlow(id, amountPaise, at: at, accountId: accountId);
   }
 
   @override

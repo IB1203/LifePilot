@@ -605,9 +605,11 @@ class LifePilotStore extends ChangeNotifier {
     String? accountId,
     String? receiptPath,
     String? source,
+    TransactionClassification classification = TransactionClassification.other,
   }) async {
     final entry = LedgerEntry(
       subcategory: subcategory.trim(),
+      classification: classification,
       id: _newId(),
       kind: kind,
       amountPaise: amountPaise,
@@ -623,9 +625,9 @@ class LifePilotStore extends ChangeNotifier {
       source: source,
     );
     entries.add(entry);
-    await _changed();
     _adjustAccountBalance(accountId, amountPaise,
         isIncome: kind == EntryKind.income);
+    await _changed();
     return entry;
   }
 
@@ -634,9 +636,9 @@ class LifePilotStore extends ChangeNotifier {
   /// so that running balances stay in step with imported transactions.
   Future<void> addImportedEntry(LedgerEntry entry) async {
     entries.add(entry);
-    await _changed();
     _adjustAccountBalance(entry.accountId, entry.amountPaise,
         isIncome: entry.isIncome);
+    await _changed();
   }
 
   /// Subcategories used before in [category], most used first.
@@ -669,7 +671,48 @@ class LifePilotStore extends ChangeNotifier {
     final old = entries.removeAt(index);
     _adjustAccountBalance(old.accountId, old.amountPaise,
         isIncome: !old.isIncome);
+    _unlinkSource(old);
     await _changed();
+  }
+
+  static const _debtLinkPrefix = 'debt:';
+  static const _investmentLinkPrefix = 'investment:';
+
+  /// Removes what a deleted entry was recorded for: the debt payment or the
+  /// investment flow it came from, so the Debts and Investments tabs stay
+  /// in step with the ledger.
+  void _unlinkSource(LedgerEntry entry) {
+    final link = entry.sourceReference;
+    if (link == null) return;
+    if (link.startsWith(_debtLinkPrefix)) {
+      final parts = link.substring(_debtLinkPrefix.length).split(':');
+      if (parts.length != 2) return;
+      final index = debts.indexWhere((item) => item.id == parts[0]);
+      if (index < 0) return;
+      final debt = debts[index];
+      final payments =
+          debt.payments.where((item) => item.id != parts[1]).toList();
+      if (payments.length == debt.payments.length) return;
+      var updated = debt.copyWith(payments: payments);
+      if (debtStatus(updated, asOf: now()).outstandingPaise > 0) {
+        updated = updated.copyWith(closed: false);
+      }
+      debts[index] = updated;
+    } else if (link.startsWith(_investmentLinkPrefix)) {
+      final parts = link.substring(_investmentLinkPrefix.length).split(':');
+      if (parts.length != 2) return;
+      final index = investments.indexWhere((item) => item.id == parts[0]);
+      if (index < 0) return;
+      final item = investments[index];
+      final flow = item.flows.where((flow) => flow.id == parts[1]).firstOrNull;
+      if (flow == null) return;
+      investments[index] = item.copyWith(
+        flows: item.flows.where((flow) => flow.id != parts[1]).toList(),
+        valuePaise: item.valuePaise == null
+            ? null
+            : item.valuePaise! - flow.amountPaise,
+      );
+    }
   }
 
   /// Applies the same correction to many past entries, then recalculates
@@ -686,17 +729,23 @@ class LifePilotStore extends ChangeNotifier {
     for (var i = 0; i < entries.length; i++) {
       final entry = entries[i];
       if (!where(entry)) continue;
-      entries[i] = entry.copyWith(
+      final updated = entry.copyWith(
         kind: kind,
         category: category,
         paymentMethod: paymentMethod,
         accountId: accountId,
         clearAccount: clearAccount,
       );
+      entries[i] = updated;
+      // Move only the affected accounts, so bank-synced balances of other
+      // accounts are not overwritten by a full recalculation.
+      _adjustAccountBalance(entry.accountId, entry.amountPaise,
+          isIncome: !entry.isIncome);
+      _adjustAccountBalance(updated.accountId, updated.amountPaise,
+          isIncome: updated.isIncome);
       changed++;
     }
     if (changed > 0) {
-      _recalculateBalances();
       await _changed();
     }
     return changed;
@@ -709,7 +758,9 @@ class LifePilotStore extends ChangeNotifier {
     final keepIndex = entries.indexWhere((entry) => entry.id == keepId);
     if (keepIndex < 0) return null;
     var keep = entries[keepIndex];
+    final originalAccountId = keep.accountId;
     final remove = duplicateIds.toSet()..remove(keepId);
+    final removed = entries.where((entry) => remove.contains(entry.id)).toList();
     final notes = <String>[
       if (keep.note.trim().isNotEmpty) keep.note.trim(),
     ];
@@ -725,12 +776,23 @@ class LifePilotStore extends ChangeNotifier {
         keep = keep.copyWith(accountId: entry.accountId);
       }
     }
-    entries[keepIndex] =
-        keep.copyWith(note: notes.join(' · '));
+    final merged = keep.copyWith(note: notes.join(' · '));
+    entries[keepIndex] = merged;
     entries.removeWhere((entry) => remove.contains(entry.id));
-    _recalculateBalances();
+    // Only the accounts the removed entries touched change; other accounts
+    // keep their bank-synced running balances.
+    for (final entry in removed) {
+      _adjustAccountBalance(entry.accountId, entry.amountPaise,
+          isIncome: !entry.isIncome);
+    }
+    if (merged.accountId != originalAccountId) {
+      _adjustAccountBalance(originalAccountId, merged.amountPaise,
+          isIncome: !merged.isIncome);
+      _adjustAccountBalance(merged.accountId, merged.amountPaise,
+          isIncome: merged.isIncome);
+    }
     await _changed();
-    return entries[keepIndex];
+    return merged;
   }
 
   /// Adds imported entries, skipping ones that duplicate an existing record
@@ -777,6 +839,8 @@ class LifePilotStore extends ChangeNotifier {
     bool rollover = false,
     int alertPercent = 80,
   }) async {
+    final previous =
+        budgets.where((budget) => budget.category == category).firstOrNull;
     budgets.removeWhere((budget) => budget.category == category);
     budgets.add(SpendingBudget(
       category: category,
@@ -784,6 +848,7 @@ class LifePilotStore extends ChangeNotifier {
       period: period,
       rollover: rollover,
       alertPercent: alertPercent,
+      createdAt: previous == null ? now() : previous.createdAt,
     ));
     if (!categories.contains(category)) categories.insert(0, category);
     await _changed();
@@ -1073,6 +1138,7 @@ class LifePilotStore extends ChangeNotifier {
     DateTime? paidAt,
     bool recordExpense = true,
     String paymentMethod = 'Other',
+    String? accountId,
   }) async {
     final index = bills.indexWhere((bill) => bill.id == id);
     if (index < 0) return;
@@ -1093,7 +1159,10 @@ class LifePilotStore extends ChangeNotifier {
         paymentMethod: paymentMethod,
         note: 'Bill due ${formatDate(bill.nextDueAt)}',
         billId: bill.id,
+        accountId: accountId,
+        classification: TransactionClassification.bills,
       ));
+      _adjustAccountBalance(accountId, amount, isIncome: false);
     }
     final next = bill.recurrence.next(bill.nextDueAt);
     bills[index] = bill.copyWith(
@@ -1121,6 +1190,10 @@ class LifePilotStore extends ChangeNotifier {
     final bill = bills[index];
     final last = bill.payments.last;
     if (last.entryId != null) {
+      for (final entry in entries.where((entry) => entry.id == last.entryId)) {
+        _adjustAccountBalance(entry.accountId, entry.amountPaise,
+            isIncome: !entry.isIncome);
+      }
       entries.removeWhere((entry) => entry.id == last.entryId);
     }
     bills[index] = bill.copyWith(
@@ -1440,7 +1513,17 @@ class LifePilotStore extends ChangeNotifier {
   Future<void> updateAccount(Account updated) async {
     final index = accounts.indexWhere((item) => item.id == updated.id);
     if (index < 0) throw StateError('That account no longer exists.');
+    final old = accounts[index];
     accounts[index] = updated;
+    final shift = updated.openingBalancePaise - old.openingBalancePaise;
+    if (shift != 0) {
+      if (_accountBalances.containsKey(updated.id)) {
+        _accountBalances[updated.id] = _accountBalances[updated.id]! + shift;
+      } else {
+        _accountBalances[updated.id] =
+            accountBalance(updated, entries, transfers);
+      }
+    }
     await _changed();
   }
 
@@ -1562,9 +1645,33 @@ class LifePilotStore extends ChangeNotifier {
     _accountBalances[account.id] = balance.paise;
     final index = accounts.indexWhere((item) => item.id == account.id);
     if (index >= 0) {
-      accounts[index] = account.copyWith(lastSyncedAt: balance.at);
+      // Keep the account's own figures in step, so every screen that shows
+      // the "available" balance shows the bank's latest one.
+      accounts[index] = account.copyWith(
+        lastSyncedAt: balance.at,
+        currentBalancePaise: balance.isLimit ? null : balance.paise,
+        availableBalancePaise: balance.isLimit ? null : balance.paise,
+        lastUpdatedAt: balance.at,
+      );
     }
     return true;
+  }
+
+  /// Sets [accountId]'s balance to what the user says it holds now, e.g. the
+  /// figure from their banking app. Entries dated before now are taken as
+  /// already included.
+  Future<void> setAccountBalance(String accountId, int paise) async {
+    final index = accounts.indexWhere((item) => item.id == accountId);
+    if (index < 0) throw StateError('That account no longer exists.');
+    final at = now();
+    _accountBalances[accountId] = paise;
+    accounts[index] = accounts[index].copyWith(
+      currentBalancePaise: paise,
+      availableBalancePaise: paise,
+      lastSyncedAt: at,
+      lastUpdatedAt: at,
+    );
+    await _changed();
   }
 
   /// Accepts the bank's balance for the account it belongs to.
@@ -1648,6 +1755,16 @@ class LifePilotStore extends ChangeNotifier {
   /// transfers involving it are removed.
   Future<void> deleteAccount(String id) async {
     accounts.removeWhere((item) => item.id == id);
+    _accountBalances.remove(id);
+    for (final transfer in transfers) {
+      if (transfer.fromAccountId == id) {
+        _adjustAccountBalance(transfer.toAccountId, transfer.amountPaise,
+            isIncome: false);
+      } else if (transfer.toAccountId == id) {
+        _adjustAccountBalance(transfer.fromAccountId, transfer.amountPaise,
+            isIncome: true);
+      }
+    }
     transfers.removeWhere(
         (item) => item.fromAccountId == id || item.toAccountId == id);
     for (var i = 0; i < entries.length; i++) {
@@ -1678,10 +1795,10 @@ class LifePilotStore extends ChangeNotifier {
       note: note.trim(),
     );
     transfers.add(transfer);
-    await _changed();
     // Money leaves the source account and arrives at the destination.
     _adjustAccountBalance(fromAccountId, amountPaise, isIncome: false);
     _adjustAccountBalance(toAccountId, amountPaise, isIncome: true);
+    await _changed();
     return transfer;
   }
 
@@ -1811,9 +1928,9 @@ class LifePilotStore extends ChangeNotifier {
             item.source != 'recurring' &&
             item.recurringId == null &&
             expected(item.entry));
-        // Or it was already recorded, by hand or from SMS. Expenses need a
-        // matching name here, so an unrelated payment of the same amount
-        // does not swallow the draft.
+        // Or it was already recorded, by hand, from SMS or a statement.
+        // Expenses need a matching name or the same category here, so an
+        // unrelated payment of the same amount does not swallow the draft.
         final recorded = entries.any((entry) =>
             entry.source != 'recurring' &&
             matchesRecurring(
@@ -1822,7 +1939,7 @@ class LifePilotStore extends ChangeNotifier {
               title: rule.title,
               due: due,
               entry: entry,
-              requireName: true,
+              requireName: entry.category != rule.category,
             ));
         if (smsDraft >= 0 || recorded) changed = true;
         if (smsDraft >= 0) {
@@ -1937,6 +2054,7 @@ class LifePilotStore extends ChangeNotifier {
         balancePaise: draft.balancePaise,
         autoPay: draft.autoPay,
         billId: draft.billId,
+        dedupKey: draft.dedupKey,
       ));
     }
     for (final match in import.recurringMatches) {
@@ -1946,12 +2064,14 @@ class LifePilotStore extends ChangeNotifier {
       final expected = draft.entry.amountPaise;
       pending[index] = draft.copyWith(
         bankConfirmed: true,
-        // The bank's amount and date are what actually happened.
+        // The bank's amount and date are what actually happened, and the
+        // account is the one the bank's message came from.
         entry: draft.entry.copyWith(
           amountPaise: match.amountPaise,
           occurredAt: match.occurredAt,
           note: match.note.isEmpty ? null : match.note,
           merchant: match.merchant.isEmpty ? null : match.merchant,
+          accountId: draft.entry.accountId ?? accountForBank(match.bank)?.id,
         ),
         sourceText: match.sourceText,
         balancePaise: match.balancePaise,
@@ -2077,11 +2197,15 @@ class LifePilotStore extends ChangeNotifier {
     final owed = debtStatus(debt, asOf: when).outstandingPaise;
     FinanceValidator.rejectOverpayment(
         amountPaise: amount, owedPaise: owed, debtName: debt.name);
+    final paymentId = _newId();
     var updated = debt.copyWith(payments: [
       ...debt.payments,
       DebtPayment(
-          id: _newId(), amountPaise: amountPaise, at: when, note: note.trim()),
+          id: paymentId, amountPaise: amountPaise, at: when, note: note.trim()),
     ]);
+    // Links the ledger entry back to this payment, so deleting the entry
+    // also removes the payment and the debt goes back up.
+    final link = '$_debtLinkPrefix${debt.id}:$paymentId';
     if (debtStatus(updated, asOf: when).outstandingPaise <= 0) {
       updated = updated.copyWith(closed: true);
     }
@@ -2098,6 +2222,13 @@ class LifePilotStore extends ChangeNotifier {
         occurredAt: when,
         note: note.trim(),
         accountId: accountId,
+        // A card bill pays for purchases already recorded as spending, so it
+        // is a transfer, not a second expense. A loan EMI is a repayment.
+        classification: debt.kind == DebtKind.creditCard
+            ? TransactionClassification.transfer
+            : TransactionClassification.debtPayment,
+        sourceType: 'debt',
+        sourceReference: link,
       ));
       _adjustAccountBalance(accountId, amountPaise, isIncome: false);
     }
@@ -2115,6 +2246,10 @@ class LifePilotStore extends ChangeNotifier {
             ? 'Interest-free lending returned'
             : note.trim(),
         accountId: accountId,
+        // Getting lent money back is not earned income.
+        classification: TransactionClassification.receivedMoney,
+        sourceType: 'debt',
+        sourceReference: link,
       ));
       _adjustAccountBalance(accountId, amountPaise, isIncome: true);
     }
@@ -2138,16 +2273,27 @@ class LifePilotStore extends ChangeNotifier {
     int installmentPaise = 0,
     int sipPaise = 0,
     int? sipDay,
+    String? fromAccountId,
   }) async {
-    FinanceValidator.requirePositivePaise(investedPaise, 'invested amount');
+    // A recurring deposit is opened with its instalment, not a lump sum, and
+    // a holding may be added with only its current value.
+    if (kind == InvestmentKind.recurringDeposit) {
+      FinanceValidator.requirePositivePaise(installmentPaise, 'instalment');
+    } else if (investedPaise < 0) {
+      throw ArgumentError('invested amount cannot be negative.');
+    } else if (investedPaise == 0 && (valuePaise ?? 0) <= 0) {
+      FinanceValidator.requirePositivePaise(investedPaise, 'invested amount');
+    }
+    final firstFlowId = _newId();
+    final opening = investedPaise > 0 && kind != InvestmentKind.recurringDeposit;
     final item = Investment(
       id: _newId(),
       name: name.trim(),
       kind: kind,
       flows: [
-        if (investedPaise > 0 && kind != InvestmentKind.recurringDeposit)
+        if (opening)
           InvestmentFlow(
-              id: _newId(),
+              id: firstFlowId,
               amountPaise: investedPaise,
               at: dateOnly(startDate)),
       ],
@@ -2161,8 +2307,36 @@ class LifePilotStore extends ChangeNotifier {
       sipDay: sipPaise > 0 ? sipDay : null,
     );
     investments.add(item);
+    if (opening && fromAccountId != null) {
+      _recordInvestmentEntry(item, firstFlowId, investedPaise,
+          dateOnly(startDate), fromAccountId);
+    }
     await _changed();
     return item;
+  }
+
+  /// Records money moving between [accountId] and an investment, so the
+  /// account balance drops when money goes in (and rises when it comes
+  /// out). Classified as an investment, it never counts as spending or
+  /// income.
+  void _recordInvestmentEntry(Investment item, String flowId, int amountPaise,
+      DateTime at, String accountId) {
+    final into = amountPaise > 0;
+    final amount = amountPaise.abs();
+    entries.add(LedgerEntry(
+      id: _newId(),
+      kind: into ? EntryKind.expense : EntryKind.income,
+      amountPaise: amount,
+      category: 'Investments',
+      title: into ? 'Invested in ${item.name}' : 'Withdrawn from ${item.name}',
+      occurredAt: at,
+      paymentMethod: 'Bank transfer',
+      accountId: accountId,
+      classification: TransactionClassification.investment,
+      sourceType: 'investment',
+      sourceReference: '$_investmentLinkPrefix${item.id}:$flowId',
+    ));
+    _adjustAccountBalance(accountId, amount, isIncome: !into);
   }
 
   Future<void> updateInvestment(Investment updated) async {
@@ -2181,14 +2355,19 @@ class LifePilotStore extends ChangeNotifier {
   /// moves by the same amount, since the user's last value no longer
   /// includes it.
   Future<void> addInvestmentFlow(String id, int amountPaise,
-      {DateTime? at}) async {
+      {DateTime? at, String? accountId}) async {
     final index = investments.indexWhere((item) => item.id == id);
     if (index < 0) throw StateError('That investment no longer exists.');
     final item = investments[index];
+    final flowId = _newId();
+    final when = at ?? now();
+    if (accountId != null && amountPaise != 0) {
+      _recordInvestmentEntry(item, flowId, amountPaise, when, accountId);
+    }
     investments[index] = item.copyWith(
       flows: [
         ...item.flows,
-        InvestmentFlow(id: _newId(), amountPaise: amountPaise, at: at ?? now()),
+        InvestmentFlow(id: flowId, amountPaise: amountPaise, at: when),
       ],
       valuePaise:
           item.valuePaise == null ? null : item.valuePaise! + amountPaise,
@@ -2404,8 +2583,31 @@ class LifePilotStore extends ChangeNotifier {
         createdAt: draft.createdAt,
         sourceKey: draft.sourceKey,
         sourceText: draft.sourceText,
+        warning: draft.warning,
         balancePaise: draft.balancePaise,
+        dedupKey: draft.dedupKey,
       ));
+    }
+    for (final match in import.recurringMatches) {
+      final index = pending.indexWhere((draft) => draft.id == match.pendingId);
+      if (index < 0) continue;
+      final draft = pending[index];
+      final expected = draft.entry.amountPaise;
+      pending[index] = draft.copyWith(
+        bankConfirmed: true,
+        entry: draft.entry.copyWith(
+          amountPaise: match.amountPaise,
+          // The row's date, not noon, so a closing balance synced for the same
+          // statement is known to include it.
+          occurredAt: match.occurredAt,
+          accountId: draft.entry.accountId ?? resolvedAccountId,
+        ),
+        sourceText: 'Confirmed by your bank statement: ${match.narration}',
+        balancePaise: match.balancePaise,
+        warning: match.amountPaise == expected
+            ? null
+            : 'Your bank shows ${formatMoney(match.amountPaise)}; the recurring entry expects ${formatMoney(expected)}. Edit the recurring entry if the amount has changed.',
+      );
     }
     seenSms.addAll(import.keys);
     if (mapping != null) {
@@ -2507,17 +2709,37 @@ class LifePilotStore extends ChangeNotifier {
       receiptPath: values.receiptPath,
       source: draft.source,
       billId: draft.billId ?? values.billId,
+      classification: values.classification,
+      sourceType: values.sourceType,
+      sourceReference: values.sourceReference,
     );
     entries.add(entry);
-    await _changed();
-    // Auto-adjust the linked account's running balance. When the SMS reported
-    // a balance after this transaction, trust it; otherwise adjust by the
-    // entry amount (income adds, expense subtracts).
+    // Auto-adjust the linked account's running balance. When the bank (SMS
+    // or statement) reported the balance after this transaction, the account
+    // ends at the bank's latest balance: this one if it is the newest, or
+    // the newer one already synced, which includes this transaction.
+    // Otherwise adjust by the entry amount (income adds, expense subtracts).
     final accountId = values.accountId;
     if (accountId != null && _accountBalances.containsKey(accountId)) {
-      final smsBalance = edited == null ? draft.balancePaise : null;
-      if (smsBalance != null) {
-        _accountBalances[accountId] = smsBalance;
+      final unchanged = edited == null ||
+          (edited.amountPaise == draft.entry.amountPaise &&
+              edited.kind == draft.entry.kind &&
+              edited.accountId == draft.entry.accountId);
+      final bankBalance = unchanged ? draft.balancePaise : null;
+      final accountIndex = accounts.indexWhere((item) => item.id == accountId);
+      final syncedAt =
+          accountIndex < 0 ? null : accounts[accountIndex].lastSyncedAt;
+      if (bankBalance != null &&
+          (syncedAt == null || !values.occurredAt.isBefore(syncedAt))) {
+        _accountBalances[accountId] = bankBalance;
+        if (accountIndex >= 0) {
+          accounts[accountIndex] =
+              accounts[accountIndex].copyWith(lastSyncedAt: values.occurredAt);
+        }
+      } else if (bankBalance != null ||
+          (syncedAt != null && !values.occurredAt.isAfter(syncedAt))) {
+        // A bank balance from on or after this transaction is already in
+        // place and includes it; adding it again would count it twice.
       } else {
         final current = _accountBalances[accountId]!;
         final delta =
@@ -2525,6 +2747,7 @@ class LifePilotStore extends ChangeNotifier {
         _accountBalances[accountId] = current + delta;
       }
     }
+    await _changed();
     // If the draft was matched to an existing bill (e.g. a bill payment SMS),
     // mark the bill as paid. recordExpense is false because the entry above
     // already records the expense — we must not count it twice.

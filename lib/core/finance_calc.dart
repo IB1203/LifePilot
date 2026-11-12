@@ -47,6 +47,17 @@ DateRange budgetRange(BudgetPeriod period, DateTime now, {int offset = 0}) =>
 bool isInternalMovement(LedgerEntry entry) =>
     entry.classification == TransactionClassification.transfer;
 
+/// True when an entry moves money into or out of an investment. Buying one
+/// is saving, not spending, and selling one is not earned income, so these
+/// stay out of income, expense and budget totals as well.
+bool isInvestmentMovement(LedgerEntry entry) =>
+    entry.classification == TransactionClassification.investment;
+
+/// Entries that are neither income nor spending: internal transfers and
+/// investment purchases or redemptions.
+bool isNonCashFlow(LedgerEntry entry) =>
+    isInternalMovement(entry) || isInvestmentMovement(entry);
+
 int sumEntries(
   Iterable<LedgerEntry> entries, {
   EntryKind? kind,
@@ -55,7 +66,7 @@ int sumEntries(
 }) {
   var total = 0;
   for (final entry in entries) {
-    if (isInternalMovement(entry)) continue;
+    if (isNonCashFlow(entry)) continue;
     if (kind != null && entry.kind != kind) continue;
     if (range != null && !range.contains(entry.occurredAt)) continue;
     if (category != null && entry.category != category) continue;
@@ -119,10 +130,6 @@ SmartSummary smartSummarize(Iterable<LedgerEntry> entries, DateRange range) {
     if (!range.contains(entry.occurredAt)) continue;
 
     switch (entry.classification) {
-      case TransactionClassification.income:
-        income += entry.amountPaise;
-      case TransactionClassification.expense:
-        expenses += entry.amountPaise;
       case TransactionClassification.investment:
         investments += entry.amountPaise;
       case TransactionClassification.refund:
@@ -133,18 +140,17 @@ SmartSummary smartSummarize(Iterable<LedgerEntry> entries, DateRange range) {
         moneyReceived += entry.amountPaise;
       case TransactionClassification.cashWithdrawal:
         moneySent += entry.amountPaise;
-      case TransactionClassification.bills:
-        expenses += entry.amountPaise;
-      case TransactionClassification.shopping:
-        expenses += entry.amountPaise;
-      case TransactionClassification.food:
-        expenses += entry.amountPaise;
-      case TransactionClassification.debtPayment:
-        expenses += entry.amountPaise;
       case TransactionClassification.loanReceived:
         moneyReceived += entry.amountPaise;
+      case TransactionClassification.income:
+      case TransactionClassification.expense:
+      case TransactionClassification.bills:
+      case TransactionClassification.shopping:
+      case TransactionClassification.food:
+      case TransactionClassification.debtPayment:
       case TransactionClassification.other:
-        // Default by direction.
+        // Spending types and plain income follow the entry's direction, so
+        // a mislabelled entry is never counted on the wrong side.
         if (entry.kind == EntryKind.income) {
           income += entry.amountPaise;
         } else {
@@ -202,7 +208,7 @@ Map<String, int> categoryTotals(
 }) {
   final totals = <String, int>{};
   for (final entry in entries) {
-    if (isInternalMovement(entry)) continue;
+    if (isNonCashFlow(entry)) continue;
     if (entry.kind != kind || !range.contains(entry.occurredAt)) continue;
     totals.update(entry.category, (value) => value + entry.amountPaise,
         ifAbsent: () => entry.amountPaise);
@@ -219,6 +225,7 @@ Map<String, int> subcategoryTotals(
   final totals = <String, int>{};
   for (final entry in entries) {
     if (entry.kind != EntryKind.expense ||
+        isNonCashFlow(entry) ||
         entry.category != category ||
         !range.contains(entry.occurredAt)) {
       continue;
@@ -239,7 +246,9 @@ List<({DateTime day, int amount})> dailyExpenses(
 ) {
   final totals = List<int>.filled(range.days, 0);
   for (final entry in entries) {
-    if (entry.kind != EntryKind.expense || !range.contains(entry.occurredAt)) {
+    if (entry.kind != EntryKind.expense ||
+        isNonCashFlow(entry) ||
+        !range.contains(entry.occurredAt)) {
       continue;
     }
     final index = DateRange(range.start, entry.occurredAt).days;
@@ -302,7 +311,7 @@ BudgetStatus budgetStatus(
   final spent = sumEntries(entries,
       kind: EntryKind.expense, range: range, category: budget.category);
   var carried = 0;
-  if (budget.rollover) {
+  if (budget.rollover && _hadPreviousPeriod(budget, range)) {
     final previous = sumEntries(entries,
         kind: EntryKind.expense,
         range: budgetRange(budget.period, now, offset: -1),
@@ -315,6 +324,14 @@ BudgetStatus budgetStatus(
     spentPaise: spent,
     carriedOverPaise: carried,
   );
+}
+
+/// Whether [budget] already existed during the period before [range], so
+/// that period's unspent money may roll over. Budgets without a creation
+/// date (saved by older versions) are treated as long-standing.
+bool _hadPreviousPeriod(SpendingBudget budget, DateRange range) {
+  final created = budget.createdAt;
+  return created == null || created.isBefore(range.start);
 }
 
 class BudgetTotals {
@@ -359,7 +376,7 @@ List<({DateRange range, int limit, int spent})> budgetHistory(
       () {
         final range = budgetRange(budget.period, now, offset: offset);
         var limit = budget.limitPaise;
-        if (budget.rollover) {
+        if (budget.rollover && _hadPreviousPeriod(budget, range)) {
           final previous = spentIn(
               budgetRange(budget.period, now, offset: offset - 1));
           if (previous < budget.limitPaise) {
@@ -439,12 +456,28 @@ class DuplicateGroup {
       entries.fold(0, (sum, entry) => sum + entry.amountPaise);
 }
 
-final _referencePattern =
-    RegExp(r'\b(?:ref(?:erence)?|utr|rrn|upi\s*ref|txn|transaction)\D{0,8}([A-Za-z0-9]{6,24})',
-        caseSensitive: false);
+final _referencePattern = RegExp(
+    r'\b(?:ref(?:erence)?|utr|rrn|upi\s*ref|txn|transaction)(?:\s*(?:no|num|number|id))?\.?\s*[:#-]?\s*([A-Za-z0-9]*\d[A-Za-z0-9]*)',
+    caseSensitive: false);
 
-String? _referenceOf(LedgerEntry entry) =>
-    _referencePattern.firstMatch('${entry.note} ${entry.title}')?.group(1);
+/// A bank reference (UTR/RRN/UPI ref) on the entry, if it has one. It must
+/// contain a digit and be 6–24 characters, so words such as "transaction
+/// successful" are not mistaken for one.
+String? _referenceOf(LedgerEntry entry) {
+  final stored = entry.sourceReference;
+  if (stored != null &&
+      stored.length >= 6 &&
+      !stored.contains('|') &&
+      RegExp(r'\d').hasMatch(stored)) {
+    return stored;
+  }
+  for (final match
+      in _referencePattern.allMatches('${entry.note} ${entry.title}')) {
+    final value = match.group(1)!;
+    if (value.length >= 6 && value.length <= 24) return value;
+  }
+  return null;
+}
 
 String _plain(String value) =>
     value.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]+'), ' ').trim();
@@ -477,14 +510,23 @@ List<DuplicateGroup> findDuplicateGroups(
       }
       final firstRef = _referenceOf(first);
       final otherRef = _referenceOf(other);
+      // Two different bank references are two different transactions.
+      if (firstRef != null && otherRef != null && firstRef != otherRef) {
+        continue;
+      }
       final sameReference = firstRef != null && firstRef == otherRef;
-      final firstText = _plain('${first.title} ${first.merchant}');
-      final otherText = _plain('${other.title} ${other.merchant}');
-      final sameWords = firstText.isNotEmpty &&
-          otherText.isNotEmpty &&
-          (firstText == otherText ||
-              firstText.contains(otherText) ||
-              otherText.contains(firstText));
+      Set<String> words(LedgerEntry entry) =>
+          _plain('${entry.title} ${entry.merchant}')
+              .split(' ')
+              .where((word) => word.isNotEmpty)
+              .toSet();
+      final firstWords = words(first);
+      final otherWords = words(other);
+      // Whole words, not substrings: "tea" must not match "steam".
+      final sameWords = firstWords.isNotEmpty &&
+          otherWords.isNotEmpty &&
+          (firstWords.containsAll(otherWords) ||
+              otherWords.containsAll(firstWords));
       if (!sameReference && !sameWords) continue;
       members.add(other);
       used.add(j);

@@ -5,6 +5,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../core/cash_plan.dart' show occurrences;
+import '../core/finance_calc.dart' show isNonCashFlow;
 import '../core/formatters.dart';
 import '../core/local_store.dart';
 import '../core/models.dart';
@@ -358,6 +359,8 @@ class _AccountFormSheetState extends State<_AccountFormSheet> {
   late final TextEditingController name;
   late final TextEditingController opening;
   late final TextEditingController last4;
+  late final TextEditingController current;
+  late final int? currentPaise;
   var negative = false;
   var kind = AccountKind.bank;
   final formKey = GlobalKey<FormState>();
@@ -372,6 +375,12 @@ class _AccountFormSheetState extends State<_AccountFormSheet> {
           ? ''
           : paiseToInput(account.openingBalancePaise.abs()));
     last4 = TextEditingController(text: account?.last4 ?? '');
+    currentPaise =
+        account == null ? null : widget.store.accountRunningBalance(account.id);
+    current = TextEditingController(
+        text: currentPaise == null
+            ? ''
+            : '${currentPaise! < 0 ? '-' : ''}${paiseToInput(currentPaise!.abs())}');
     negative = (account?.openingBalancePaise ?? 0) < 0;
     kind = account?.kind ?? AccountKind.bank;
   }
@@ -381,7 +390,22 @@ class _AccountFormSheetState extends State<_AccountFormSheet> {
     name.dispose();
     opening.dispose();
     last4.dispose();
+    current.dispose();
     super.dispose();
+  }
+
+  /// The typed current balance in paise; a leading minus means owed.
+  /// Null when the field is empty or not a valid amount.
+  int? _typedCurrent() {
+    final text = current.text.trim();
+    if (text.isEmpty) return null;
+    final owed = text.startsWith('-') || text.startsWith('−');
+    final digits = text.replaceFirst(RegExp(r'^[-−]\s*'), '');
+    final paise = RegExp(r'^[0.,\s]+$').hasMatch(digits)
+        ? 0
+        : parseRupeesToPaise(digits);
+    if (paise == null) return null;
+    return owed ? -paise : paise;
   }
 
   @override
@@ -458,6 +482,7 @@ class _AccountFormSheetState extends State<_AccountFormSheet> {
               ),
               validator: (value) => value == null ||
                       value.trim().isEmpty ||
+                      RegExp(r'^[0.,\s]+$').hasMatch(value) ||
                       parseRupeesToPaise(value) != null
                   ? null
                   : 'Enter a valid amount.',
@@ -468,6 +493,28 @@ class _AccountFormSheetState extends State<_AccountFormSheet> {
               value: negative,
               onChanged: (value) => setState(() => negative = value),
             ),
+            if (account != null) ...[
+              const SizedBox(height: 4),
+              TextFormField(
+                controller: current,
+                keyboardType: const TextInputType.numberWithOptions(
+                    decimal: true, signed: true),
+                inputFormatters: [
+                  FilteringTextInputFormatter.allow(RegExp(r'[\d.,\-−]'))
+                ],
+                decoration: InputDecoration(
+                  labelText: 'Current balance',
+                  prefixText: '${MoneyFormat.symbol} ',
+                  helperText:
+                      'What the account holds today, e.g. from your banking app. Use a minus for card dues.',
+                  helperMaxLines: 2,
+                ),
+                validator: (value) =>
+                    value == null || value.trim().isEmpty || _typedCurrent() != null
+                        ? null
+                        : 'Enter a valid amount.',
+              ),
+            ],
             const SizedBox(height: 8),
             FilledButton(
               onPressed: () async {
@@ -489,6 +536,11 @@ class _AccountFormSheetState extends State<_AccountFormSheet> {
                       kind: kind,
                       openingBalancePaise: amount,
                       last4: digits));
+                  // A new current balance wins over the opening-balance shift.
+                  final typed = _typedCurrent();
+                  if (typed != null && typed != currentPaise) {
+                    await widget.store.setAccountBalance(account.id, typed);
+                  }
                 }
                 if (context.mounted) Navigator.pop(context);
               },
@@ -654,10 +706,17 @@ class _TransferFormSheetState extends State<_TransferFormSheet> {
                 // balance; add it back before checking the new amount.
                 final fromBalance =
                     widget.store.accountRunningBalance(fromAccount.id) +
-                        (transfer != null && transfer.fromAccountId == from
-                            ? transfer.amountPaise
-                            : 0);
-                if (fromBalance < amountPaise) {
+                        (transfer == null
+                            ? 0
+                            : transfer.fromAccountId == from
+                                ? transfer.amountPaise
+                                : transfer.toAccountId == from
+                                    ? -transfer.amountPaise
+                                    : 0);
+                // A card account pays from its credit line, so it may go
+                // further below zero; only cash-like accounts are checked.
+                if (fromAccount.kind != AccountKind.card &&
+                    fromBalance < amountPaise) {
                   setState(() => error =
                       'Insufficient balance in ${fromAccount.name} (${formatMoney(fromBalance)} available).');
                   return;
@@ -694,6 +753,10 @@ class _TransferFormSheetState extends State<_TransferFormSheet> {
 // ---------------------------------------------------------------------------
 // Recurring entries and drafts
 
+/// Position of the Activity tab (all recorded transactions) in the Finance
+/// page's tab bar.
+const activityTabIndex = 1;
+
 class RecurringTab extends StatelessWidget {
   const RecurringTab({required this.store, super.key});
 
@@ -723,6 +786,18 @@ class RecurringTab extends StatelessWidget {
         UnrecognizedSmsSection(store: store),
         SuspiciousSmsSection(store: store),
         MoneyFlowSection(store: store),
+        if (store.entries.isNotEmpty &&
+            DefaultTabController.maybeOf(context) != null)
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton.icon(
+              onPressed: () =>
+                  DefaultTabController.of(context).animateTo(activityTabIndex),
+              icon: const Icon(Icons.receipt_long_outlined),
+              label: Text(
+                  'See all ${store.entries.length} approved transactions'),
+            ),
+          ),
         RecurringSuggestionsSection(store: store),
         SectionHeader(
             title: 'Recurring income and expenses',
@@ -1031,8 +1106,9 @@ class PendingDraftsSection extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (store.pending.isEmpty) return const SizedBox.shrink();
+    // Newest first, so this month's drafts are not buried under last month's.
     final drafts = [...store.pending]
-      ..sort((a, b) => a.entry.occurredAt.compareTo(b.entry.occurredAt));
+      ..sort((a, b) => b.entry.occurredAt.compareTo(a.entry.occurredAt));
     final colors = AppColors.of(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1048,9 +1124,7 @@ class PendingDraftsSection extends StatelessWidget {
                 confirmLabel: 'Approve all')) {
               return;
             }
-            for (final draft in drafts) {
-              await store.approvePending(draft.id);
-            }
+            await _approveAll(store, drafts);
           },
         ),
         for (final draft in drafts)
@@ -1267,6 +1341,17 @@ class BankBalancesSection extends StatelessWidget {
                                     balance.paise < 0 ? colors.expense : null),
                       ),
                       if (mismatched)
+                        TextButton(
+                          onPressed: () async {
+                            await store.adjustToBankBalance(balance);
+                            if (context.mounted) {
+                              showMessage(context,
+                                  'Set ${account.name} to ${formatMoney(balance.paise)}.');
+                            }
+                          },
+                          child: const Text('Update'),
+                        ),
+                      if (mismatched)
                         PopupMenuButton<String>(
                           tooltip: 'Balance options',
                           onSelected: (value) async {
@@ -1313,6 +1398,22 @@ class MoneyFlowSection extends StatefulWidget {
 
 enum _FlowPeriod { thisMonth, last30Days }
 
+/// Approves [drafts] one by one, skipping any that were dismissed or
+/// approved elsewhere meanwhile. Returns how many were approved.
+Future<int> _approveAll(LifePilotStore store, List<PendingEntry> drafts) async {
+  var approved = 0;
+  for (final draft in drafts) {
+    if (!store.pending.any((item) => item.id == draft.id)) continue;
+    try {
+      await store.approvePending(draft.id);
+      approved++;
+    } on StateError {
+      // Gone already; nothing to approve.
+    }
+  }
+  return approved;
+}
+
 class _MoneyFlowSectionState extends State<MoneyFlowSection> {
   var _period = _FlowPeriod.thisMonth;
 
@@ -1349,7 +1450,7 @@ class _MoneyFlowSectionState extends State<MoneyFlowSection> {
       return const SizedBox.shrink();
     }
     int total(Iterable<LedgerEntry> items, bool income) => items
-        .where((entry) => entry.isIncome == income)
+        .where((entry) => entry.isIncome == income && !isNonCashFlow(entry))
         .fold(0, (sum, entry) => sum + entry.amountPaise);
     final credited = total(recorded, true);
     final debited = total(recorded, false);
@@ -1875,10 +1976,15 @@ class _PendingReviewPageState extends State<PendingReviewPage> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Review imports'),
-        leading: IconButton(
-          icon: const Icon(Icons.close),
-          onPressed: () => Navigator.pop(context),
-        ),
+        // Shown as a Finance tab it sits on the app's first route, so there
+        // is nothing to close; popping would leave the app.
+        automaticallyImplyLeading: false,
+        leading: ModalRoute.of(context)?.isFirst ?? true
+            ? null
+            : IconButton(
+                icon: const Icon(Icons.close),
+                onPressed: () => Navigator.pop(context),
+              ),
         actions: [
           if (drafts.isNotEmpty)
             TextButton(
@@ -1886,6 +1992,8 @@ class _PendingReviewPageState extends State<PendingReviewPage> {
                   ? null
                   : () async {
                       final navigator = Navigator.of(context);
+                      final canClose =
+                          !(ModalRoute.of(context)?.isFirst ?? true);
                       final messenger = ScaffoldMessenger.of(context);
                       if (!await confirmAction(context,
                           title: 'Approve ${drafts.length} drafts?',
@@ -1894,15 +2002,12 @@ class _PendingReviewPageState extends State<PendingReviewPage> {
                           confirmLabel: 'Approve all')) {
                         return;
                       }
-                      for (final draft in drafts) {
-                        if (!mounted) return;
-                        await store.approvePending(draft.id);
-                      }
-                      if (mounted) navigator.pop();
+                      final approved = await _approveAll(store, drafts);
+                      if (mounted && canClose) navigator.pop();
                       if (mounted) {
                         messenger.showSnackBar(SnackBar(
                           content: Text(
-                              'Approved ${drafts.length} draft${drafts.length == 1 ? '' : 's'}.'),
+                              'Approved $approved draft${approved == 1 ? '' : 's'}.'),
                         ));
                       }
                     },

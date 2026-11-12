@@ -350,4 +350,78 @@ void main() {
     expect(find.text('00:15.3'), findsOneWidget);
     expect(find.text('Resume'), findsOneWidget);
   });
+
+  testWidgets('switching a new entry to income records it as income',
+      (tester) async {
+    final store = await _launch(tester);
+    await _quickAdd(tester, 'Expense');
+    await tester.tap(find.descendant(
+        of: find.byType(SegmentedButton<EntryKind>),
+        matching: find.text('Income')));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+        find.widgetWithText(TextFormField, 'Amount'), '500');
+    // The income form is taller; give the sheet room for its save button.
+    tester.view.physicalSize = const Size(1080, 4000);
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('Save income'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Save income'));
+    await tester.pumpAndSettle();
+
+    final entry = store.entries.single;
+    expect(entry.kind, EntryKind.income);
+    expect(entry.classification, TransactionClassification.income);
+  });
+
+  testWidgets('the transactions list is reachable from Finance',
+      (tester) async {
+    await _launch(tester);
+    await _tapNav(tester, 'Finance');
+    await tester.tap(find.widgetWithText(Tab, 'Activity'));
+    await tester.pumpAndSettle();
+    expect(find.byType(TabBarView), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('Activity lists approved transactions from earlier months',
+      (tester) async {
+    final store = LifePilotStore.inMemory(clock: () => _now);
+    await store.addEntry(
+        kind: EntryKind.expense,
+        amountPaise: 45000,
+        category: 'Food',
+        title: 'Old statement row',
+        occurredAt: DateTime(_now.year, _now.month - 1, 3, 12));
+    await _launch(tester, store: store);
+    await _tapNav(tester, 'Finance');
+    await tester.tap(find.widgetWithText(Tab, 'Activity'));
+    await tester.pumpAndSettle();
+    expect(find.text('Old statement row'), findsOneWidget);
+  });
+
+  testWidgets('editing an account can set its current balance',
+      (tester) async {
+    final store = LifePilotStore.inMemory(clock: () => _now);
+    final account = await store.addAccount('HDFC', AccountKind.bank,
+        openingBalancePaise: 100000);
+    await _launch(tester, store: store);
+    await _tapNav(tester, 'Finance');
+    final tab = find.widgetWithText(Tab, 'Accounts');
+    await tester.ensureVisible(tab);
+    await tester.pumpAndSettle();
+    await tester.tap(tab);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Account options').first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Edit'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+        find.widgetWithText(TextFormField, 'Current balance'), '5,250');
+    await tester.tap(find.text('Save account'));
+    await tester.pumpAndSettle();
+    expect(store.accountRunningBalance(account.id), 525000);
+    expect(store.accounts.single.openingBalancePaise, 100000);
+    expect(tester.takeException(), isNull);
+  });
 }

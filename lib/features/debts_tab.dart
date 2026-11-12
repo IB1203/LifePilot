@@ -678,7 +678,9 @@ class _PaymentFormState extends State<_PaymentForm> {
                 contentPadding: EdgeInsets.zero,
                 value: _record,
                 onChanged: (value) => setState(() => _record = value ?? false),
-                title: const Text('Also record as an expense (Loans)'),
+                title: Text(debt.kind == DebtKind.creditCard
+                    ? 'Also record the payment from my bank account'
+                    : 'Also record as a loan repayment'),
               ),
             if (debt.owedToMe)
               CheckboxListTile(

@@ -238,27 +238,38 @@ class _LockScreenState extends State<LockScreen> {
       _blockedUntil != null && DateTime.now().isBefore(_blockedUntil!);
 
   Future<void> _press(String digit) async {
-    if (_checking || _blocked || _pin.length >= 6) return;
+    if (_checking || _blocked || _pin.length >= _dots) return;
     HapticFeedback.selectionClick();
     setState(() {
       _pin += digit;
       _error = null;
     });
     final settings = widget.store.settings;
-    // PINs are 4–6 digits; try once the length could match.
-    if (_pin.length < 4) return;
+    final length = settings.pinLength;
+    // With the PIN's length known, check once it is complete. Older PINs
+    // (4–6 digits, length not stored) are tried once the length could match.
+    if (_pin.length < (length ?? 4)) return;
     setState(() => _checking = true);
     final ok =
         await verifyPin(_pin, settings.pinHash ?? '', settings.pinSalt ?? '');
     if (!mounted) return;
     if (ok) {
+      if (length == null) {
+        // Remember the length so the dots match the PIN from now on.
+        await widget.store.updateSettings(
+            widget.store.settings.copyWith(pinLength: _pin.length));
+        if (!mounted) return;
+      }
       await _unlocked();
       return;
     }
     setState(() => _checking = false);
-    if (_pin.length < 6) return;
+    if (length == null && _pin.length < 6) return;
     _fail();
   }
+
+  /// Dots to show: the PIN's length, or 6 when it is not known.
+  int get _dots => widget.store.settings.pinLength ?? 6;
 
   Future<void> _fail() async {
     HapticFeedback.heavyImpact();
@@ -315,7 +326,7 @@ class _LockScreenState extends State<LockScreen> {
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      for (var i = 0; i < 6; i++)
+                      for (var i = 0; i < _dots; i++)
                         AnimatedContainer(
                           duration: motion(context, 120),
                           width: 14,
@@ -325,7 +336,7 @@ class _LockScreenState extends State<LockScreen> {
                             shape: BoxShape.circle,
                             color: i < _pin.length ? scheme.primary : null,
                             border: Border.all(
-                                color: i < 4
+                                color: i < 4 || _dots < 6
                                     ? scheme.primary
                                     : scheme.outlineVariant),
                           ),
@@ -367,7 +378,10 @@ class _LockScreenState extends State<LockScreen> {
                         child: const Icon(Icons.backspace_outlined)),
                   ],
                 ),
-                if (_pin.length >= 4 && _pin.length < 6 && !_checking)
+                if (widget.store.settings.pinLength == null &&
+                    _pin.length >= 4 &&
+                    _pin.length < 6 &&
+                    !_checking)
                   TextButton(
                     onPressed: _fail,
                     child: const Text('That is my full PIN'),
@@ -487,6 +501,7 @@ class _SetPinDialogState extends State<_SetPinDialog> {
                       widget.store.settings.copyWith(
                         pinHash: hashed.hash,
                         pinSalt: hashed.salt,
+                        pinLength: first.text.length,
                         lockEnabled: true,
                         clearPinLockout: true,
                       ),

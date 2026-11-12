@@ -36,6 +36,7 @@ abstract class BillRepository {
     DateTime? paidAt,
     bool recordExpense = true,
     String paymentMethod = 'Other',
+    String? accountId,
   });
 
   /// Reverts the most recent payment, including its linked expense.

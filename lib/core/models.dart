@@ -199,16 +199,13 @@ class LedgerEntry {
       source: json['source'] as String?,
       sourceType: json['sourceType'] as String?,
       sourceReference: json['sourceReference'] as String?,
-      classification: TransactionClassification.values.byName(
-        json['classification'] as String? ?? 'other',
-      ),
-      validationStatus: ValidationStatus.values.byName(
-        json['validationStatus'] as String? ?? 'unverified',
-      ),
+      classification: _enum(TransactionClassification.values,
+          json['classification'], TransactionClassification.other),
+      validationStatus: _enum(ValidationStatus.values,
+          json['validationStatus'], ValidationStatus.unverified),
       confidenceScore: (json['confidenceScore'] as num?)?.toDouble() ?? 0.0,
-      originalKind: EntryKind.values.byName(
-        json['originalKind'] as String? ?? json['kind'] as String,
-      ),
+      originalKind: _enum(EntryKind.values,
+          json['originalKind'] ?? json['kind'], EntryKind.expense),
       originalCategory: json['originalCategory'] as String?,
       refundLinkId: json['refundLinkId'] as String?,
     );
@@ -354,11 +351,17 @@ class SpendingBudget {
     this.period = BudgetPeriod.monthly,
     this.rollover = false,
     this.alertPercent = 80,
+    this.createdAt,
   });
 
   final String category;
   final int limitPaise;
   final BudgetPeriod period;
+
+  /// When the budget was first set. Nothing rolls over into the period it
+  /// was created in, since there was no earlier budget to leave money
+  /// unspent. Null for budgets saved before this was recorded.
+  final DateTime? createdAt;
 
   /// When true, unspent money from the previous period is added to this
   /// period's limit (one period only, never compounding).
@@ -373,6 +376,7 @@ class SpendingBudget {
         'period': period.name,
         'rollover': rollover,
         'alertPercent': alertPercent,
+        if (createdAt != null) 'createdAt': createdAt!.toIso8601String(),
       };
 
   factory SpendingBudget.fromJson(Map<String, dynamic> json) {
@@ -387,6 +391,7 @@ class SpendingBudget {
       period: _enum(BudgetPeriod.values, json['period'], BudgetPeriod.monthly),
       rollover: json['rollover'] as bool? ?? false,
       alertPercent: json['alertPercent'] as int? ?? 80,
+      createdAt: _date(json['createdAt']),
     );
   }
 }
@@ -1315,6 +1320,7 @@ class AppSettings {
     this.lockUseBiometrics = true,
     this.pinHash,
     this.pinSalt,
+    this.pinLength,
     this.onboarded = true,
     this.salaryDay,
     this.pinFailures = 0,
@@ -1348,6 +1354,10 @@ class AppSettings {
   /// PBKDF2 hash and salt of the app-lock PIN, base64. Never the PIN itself.
   final String? pinHash;
   final String? pinSalt;
+
+  /// Number of digits in the PIN, so the lock screen shows the right number
+  /// of dots. Null for PINs set before this was stored.
+  final int? pinLength;
   final bool onboarded;
 
   /// Day of month salary usually arrives, from onboarding.
@@ -1410,6 +1420,7 @@ class AppSettings {
     bool? lockUseBiometrics,
     String? pinHash,
     String? pinSalt,
+    int? pinLength,
     bool clearPin = false,
     bool? onboarded,
     int? salaryDay,
@@ -1444,6 +1455,7 @@ class AppSettings {
         lockUseBiometrics: lockUseBiometrics ?? this.lockUseBiometrics,
         pinHash: clearPin ? null : pinHash ?? this.pinHash,
         pinSalt: clearPin ? null : pinSalt ?? this.pinSalt,
+        pinLength: clearPin ? null : pinLength ?? this.pinLength,
         onboarded: onboarded ?? this.onboarded,
         salaryDay: salaryDay ?? this.salaryDay,
         pinFailures: clearPinLockout ? 0 : pinFailures ?? this.pinFailures,
@@ -1477,6 +1489,7 @@ class AppSettings {
         'lockUseBiometrics': lockUseBiometrics,
         'pinHash': pinHash,
         'pinSalt': pinSalt,
+        'pinLength': pinLength,
         'onboarded': onboarded,
         'salaryDay': salaryDay,
         'pinFailures': pinFailures,
@@ -1525,6 +1538,10 @@ class AppSettings {
       lockUseBiometrics: source['lockUseBiometrics'] as bool? ?? true,
       pinHash: pinHash,
       pinSalt: pinSalt,
+      pinLength: switch (source['pinLength']) {
+        final int length when length >= 4 && length <= 6 => length,
+        _ => null,
+      },
       // Settings saved before onboarding existed belong to existing users.
       onboarded: source['onboarded'] as bool? ?? true,
       salaryDay: source['salaryDay'] as int?,

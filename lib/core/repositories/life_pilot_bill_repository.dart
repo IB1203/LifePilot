@@ -56,6 +56,7 @@ class LifePilotBillRepository implements BillRepository {
     DateTime? paidAt,
     bool recordExpense = true,
     String paymentMethod = 'Other',
+    String? accountId,
   }) async {
     await store.markBillPaid(
       id,
@@ -63,6 +64,7 @@ class LifePilotBillRepository implements BillRepository {
       paidAt: paidAt,
       recordExpense: recordExpense,
       paymentMethod: paymentMethod,
+      accountId: accountId,
     );
   }
 

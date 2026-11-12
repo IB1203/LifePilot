@@ -2,6 +2,7 @@ import 'formatters.dart';
 import 'local_store.dart';
 import 'models.dart';
 import 'personal.dart' show suggestCategory, dedupKeyForEntry;
+import 'recurring_detect.dart' show matchesRecurring;
 import 'sms_import.dart' show ruleCategory;
 
 /// Bank statements exported from net banking as CSV or Excel. Banks lay
@@ -199,7 +200,8 @@ DateTime? _valid(int year, int month, int day) {
 DateTime? parseStatementDate(String value) {
   final text = value.trim();
   if (text.isEmpty) return null;
-  var match = RegExp(r'^(\d{4})-(\d{1,2})-(\d{1,2})').firstMatch(text);
+  var match =
+      RegExp(r'^(\d{4})[\-/.](\d{1,2})[\-/.](\d{1,2})').firstMatch(text);
   if (match != null) {
     return _valid(
         int.parse(match[1]!), int.parse(match[2]!), int.parse(match[3]!));
@@ -225,6 +227,30 @@ DateTime? parseStatementDate(String value) {
     return DateTime(1899, 12, 30 + serial.floor());
   }
   return null;
+}
+
+/// How many consecutive rows of [rows], read in this order, move the
+/// balance by exactly the row's amount.
+int _balanceFit(List<_RawStatementRow> rows) {
+  var fit = 0;
+  for (var i = 1; i < rows.length; i++) {
+    final before = rows[i - 1].balancePaise;
+    final after = rows[i].balancePaise;
+    if (before == null || after == null) continue;
+    if ((after - before).abs() == rows[i].amountPaise.abs()) fit++;
+  }
+  return fit;
+}
+
+/// A balance cell. Unlike an amount cell, zero is a real value here: an
+/// account emptied to 0.00 must still anchor the next row's balance change.
+int? parseStatementBalance(String value) {
+  final parsed = parseStatementAmount(value);
+  if (parsed != null) return parsed;
+  final digits = value
+      .toLowerCase()
+      .replaceAll(RegExp(r'[₹,\s()+\-]|rs\.?|inr|dr$|cr$'), '');
+  return RegExp(r'^0+(?:\.0*)?$').hasMatch(digits) ? 0 : null;
 }
 
 /// An amount cell: "1,234.50", "₹ 1,234.50", "1234.5 Cr", "-250", "(250)".
@@ -429,7 +455,7 @@ StatementParse parseStatementTable(
           }
         }
       }
-      final rowBalance = parseStatementAmount(cell(row, balance));
+      final rowBalance = parseStatementBalance(cell(row, balance));
       if (amountPaise == null || amountPaise == 0) {
         if (rowBalance != null) balanceOnly[position] = rowBalance;
         skipped++;
@@ -455,8 +481,13 @@ StatementParse parseStatementTable(
     // Read balances in the order the statement lists them. When the file is
     // newest-first, walk it backwards; same-day transactions keep their
     // order either way.
-    final oldestFirst =
-        !raw.first.date.isAfter(raw.last.date);
+    final oldestFirst = raw.first.date.isBefore(raw.last.date)
+        ? true
+        : raw.first.date.isAfter(raw.last.date)
+            ? false
+            // Same first and last date: the order whose balance changes
+            // match the amounts is the real one.
+            : _balanceFit(raw) >= _balanceFit(raw.reversed.toList());
     final chronological = oldestFirst ? raw : raw.reversed.toList();
     // Start from the opening balance printed beside the transactions, so the
     // first transaction's direction can be read from the balance change too.
@@ -790,8 +821,21 @@ String statementKey(StatementRow row) {
   return 'stmt:${hash.toRadixString(16)}';
 }
 
+/// A recurring draft (salary, rent…) that a statement row shows was
+/// actually paid or received.
+typedef StatementRecurringMatch = ({
+  String pendingId,
+  int amountPaise,
+  DateTime occurredAt,
+  String narration,
+  int? balancePaise,
+});
+
 class StatementImport {
   final drafts = <PendingEntry>[];
+
+  /// Recurring drafts confirmed by a row, so the row is not drafted twice.
+  final recurringMatches = <StatementRecurringMatch>[];
 
   /// Rows already in LifePilot (recorded, or waiting as drafts).
   var duplicates = 0;
@@ -816,6 +860,41 @@ class StatementImport {
       .fold(0, (sum, draft) => sum + draft.entry.amountPaise);
 }
 
+/// Whether a recorded entry and a statement narration name the same payee:
+/// a word of the entry's title or merchant (3+ letters) appears in the
+/// narration, or the bank reference in the entry's note does.
+bool _samePayee(LedgerEntry entry, String narration) {
+  final words = '${entry.title} ${entry.merchant}'
+      .toLowerCase()
+      .split(RegExp(r'[^a-z0-9]+'))
+      .where((word) => word.length >= 3)
+      .toSet()
+    ..removeAll(const {'upi', 'payment', 'transfer', 'imps', 'neft', 'txn'});
+  final reference = RegExp(r'\d{6,}').firstMatch(entry.note)?.group(0);
+  final text = narration.toLowerCase();
+  if (reference != null && text.contains(reference)) return true;
+  if (words.isEmpty) return false;
+  final narrationWords = text.split(RegExp(r'[^a-z0-9]+')).toSet();
+  return words.any(narrationWords.contains);
+}
+
+/// The type a statement draft is recorded with. Deliberately narrow: only
+/// clear refunds, credit card bill payments and transfers to the user's own
+/// accounts are taken out of income and spending. Anything else keeps the
+/// default and counts by its direction.
+TransactionClassification _draftClassification(StatementRow row,
+    {required bool refund}) {
+  if (refund) return TransactionClassification.refund;
+  if (row.kind != EntryKind.expense) return TransactionClassification.other;
+  final text = row.narration.toLowerCase();
+  if (RegExp(r'\b(?:credit\s*card|cc)\s*(?:bill\s*)?(?:payment|pymt|repayment)\b|\bcard\s*bill\b')
+          .hasMatch(text) ||
+      RegExp(r'\b(?:self|own a/?c|own account)\b').hasMatch(text)) {
+    return TransactionClassification.transfer;
+  }
+  return TransactionClassification.other;
+}
+
 /// Drafts for [rows] not yet in LifePilot. A recorded entry or draft of the
 /// same direction and amount within two days counts as the same
 /// transaction, each used once, so two equal payments are not merged.
@@ -827,6 +906,14 @@ StatementImport buildStatementImport(
     ...store.entries,
     for (final draft in store.pending) draft.entry,
   ];
+  final recordedCount = store.entries.length;
+  // The pending draft behind existing[i], if it is one.
+  PendingEntry? draftAt(int i) =>
+      i >= recordedCount ? store.pending[i - recordedCount] : null;
+  bool linkedElsewhere(LedgerEntry entry) =>
+      accountId != null &&
+      entry.accountId != null &&
+      entry.accountId != accountId;
   final used = <int>{};
   for (final original in rows) {
     final row = original.forAccount(creditCard: creditCard);
@@ -838,6 +925,7 @@ StatementImport buildStatementImport(
     }
     result.keys.add(key);
     final match = () {
+      final candidates = <int>[];
       for (var i = 0; i < existing.length; i++) {
         final entry = existing[i];
         if (used.contains(i) ||
@@ -845,13 +933,69 @@ StatementImport buildStatementImport(
             entry.amountPaise != row.amountPaise) {
           continue;
         }
-        if (entry.occurredAt.difference(row.date).inHours.abs() <= 60) return i;
+        if (entry.occurredAt.difference(row.date).inHours.abs() > 60) {
+          continue;
+        }
+        // Cash never appears on a bank statement, and an entry linked to
+        // another account belongs to that account's statement.
+        if (entry.paymentMethod == 'Cash') continue;
+        if (linkedElsewhere(entry)) continue;
+        candidates.add(i);
+      }
+      if (candidates.isNotEmpty) {
+        // Prefer the entry that names the same payee; otherwise the closest
+        // amount-and-date match (e.g. "Salary" against the employer's name).
+        return candidates.firstWhere(
+            (i) => _samePayee(existing[i], row.narration),
+            orElse: () => candidates.first);
+      }
+      // A recurring entry (salary, rent, SIP…) drafted or recorded on its
+      // due date: the bank may show it a few days off or for a slightly
+      // different amount, which is still the same payment.
+      final party = narrationParty(row.narration);
+      final probe = LedgerEntry(
+        id: '',
+        kind: row.kind,
+        amountPaise: row.amountPaise,
+        category: '',
+        title: party,
+        merchant: party,
+        occurredAt: row.date,
+      );
+      for (var i = 0; i < existing.length; i++) {
+        final entry = existing[i];
+        if (used.contains(i) ||
+            entry.source != 'recurring' ||
+            linkedElsewhere(entry)) {
+          continue;
+        }
+        if (matchesRecurring(
+          kind: entry.kind,
+          amountPaise: entry.amountPaise,
+          title: entry.title,
+          due: entry.occurredAt,
+          entry: probe,
+        )) {
+          return i;
+        }
       }
       return -1;
     }();
     if (match >= 0) {
       used.add(match);
       result.duplicates++;
+      // A recurring draft the bank has now confirmed takes the bank's
+      // amount and date, as with a bank SMS.
+      final draft = draftAt(match);
+      if (draft != null && draft.source == 'recurring' && !draft.bankConfirmed) {
+        result.recurringMatches.add((
+          pendingId: draft.id,
+          amountPaise: row.amountPaise,
+          occurredAt: DateTime(row.date.year, row.date.month, row.date.day),
+          narration: row.narration,
+          balancePaise: row.balancePaise,
+        ));
+      }
       continue;
     }
     final party = narrationParty(row.narration);
@@ -898,6 +1042,8 @@ StatementImport buildStatementImport(
                 : 'Bank transfer',
         accountId: accountId,
         source: 'statement',
+        sourceType: 'statement',
+        classification: _draftClassification(row, refund: refund),
       ),
     ));
   }
